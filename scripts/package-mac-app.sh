@@ -53,7 +53,6 @@ fi
 export GONOSUMDB="git.sr.ht/*"
 export GOPROXY="https://goproxy.cn,direct"
 export CGO_CFLAGS="-Wno-deprecated-declarations"
-export CGO_LDFLAGS="-Wl,-no_warn_duplicate_libraries"
 export EDITION=lite
 
 # Milvus 与 Qdrant 的 gRPC 生成代码均注册名为 "common.proto" 的描述符，同一进程内会冲突。

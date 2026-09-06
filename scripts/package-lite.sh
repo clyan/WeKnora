@@ -56,9 +56,6 @@ export EDITION=lite
 eval "$(./scripts/get_version.sh env)"
 LDFLAGS="-w -s $(./scripts/get_version.sh ldflags)"
 export CGO_CFLAGS="-Wno-deprecated-declarations"
-if [ "$(uname)" = "Darwin" ]; then
-    export CGO_LDFLAGS="-Wl,-no_warn_duplicate_libraries"
-fi
 CGO_ENABLED=1 go build -tags "sqlite_fts5" -ldflags="${LDFLAGS}" \
     -o WeKnora-lite ./cmd/server
 
