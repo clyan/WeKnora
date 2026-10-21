@@ -54,6 +54,7 @@ import KbTagManageDrawer from './components/KbTagManageDrawer.vue';
 import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess';
 import { useUploadConfirmStore, type UploadConfirmResult } from '@/stores/uploadConfirm';
 import WikiBrowser from './wiki/WikiBrowser.vue';
+import CodeWikiPanel from './code-wiki/CodeWikiPanel.vue';
 import { getWikiStats } from '@/api/wiki';
 import {
   isKnowledgeParseInFlight,
@@ -84,11 +85,19 @@ const uploading = ref(false);
 const kbLoading = ref(false);
 const docListLoading = ref(true);
 const isFAQ = computed(() => (kbInfo.value?.type || '') === 'faq');
+const isCodeWiki = computed(() => (kbInfo.value?.type || '') === 'code_wiki');
 const isWiki = computed(() => !!kbInfo.value?.indexing_strategy?.wiki_enabled);
-const validTabs = ['documents', 'wiki', 'graph'] as const
+const validTabs = ['documents', 'wiki', 'graph', 'codewiki'] as const
 type KbTab = typeof validTabs[number]
 const initTab = validTabs.includes(route.query.tab as any) ? (route.query.tab as KbTab) : 'documents'
 const activeKbTab = ref<KbTab>(initTab);
+// Code wiki KBs have no document pipeline: land on the wiki view unless a
+// valid tab was requested (plan §6.2: Code Wiki 默认展示 Wiki).
+watch(isCodeWiki, (codeWiki) => {
+  if (codeWiki && activeKbTab.value === 'documents') {
+    activeKbTab.value = 'wiki'
+  }
+}, { immediate: true })
 
 // Wiki 状态用于面包屑上的索引中指示。父组件自行拉取，避免依赖 WikiBrowser 挂载状态
 // （用户切到"文档" tab 时 WikiBrowser 会卸载，这里仍需持续反映后台索引进度）。
@@ -2322,9 +2331,12 @@ async function createNewSession(value: string): Promise<void> {
               </button>
               <t-icon name="chevron-right" class="breadcrumb-separator" />
               <template v-if="isWiki">
-                <span :class="['breadcrumb-tab', { active: activeKbTab === 'documents' }]"
+                <span v-if="!isCodeWiki" :class="['breadcrumb-tab', { active: activeKbTab === 'documents' }]"
                   @click="activeKbTab = 'documents'">{{ $t('knowledgeEditor.wikiBrowser.tabDocuments') }}</span>
-                <span class="breadcrumb-tab-sep">/</span>
+                <span v-if="!isCodeWiki" class="breadcrumb-tab-sep">/</span>
+                <span v-if="isCodeWiki" :class="['breadcrumb-tab', { active: activeKbTab === 'codewiki' }]"
+                  @click="activeKbTab = 'codewiki'">{{ $t('codeWiki.tabRepositories') }}</span>
+                <span v-if="isCodeWiki" class="breadcrumb-tab-sep">/</span>
                 <span :class="['breadcrumb-tab', { active: activeKbTab === 'wiki', indexing: wikiIsIndexing }]"
                   @click="activeKbTab = 'wiki'">
                   Wiki
@@ -2380,7 +2392,13 @@ async function createNewSession(value: string): Promise<void> {
           @view-graph="onViewWikiInGraph" />
       </div>
 
-      <template v-if="activeKbTab === 'documents' || !isWiki">
+      <!-- Code wiki repositories / provider / runs management -->
+      <div v-if="isCodeWiki && activeKbTab === 'codewiki'" class="wiki-main-area">
+        <CodeWikiPanel v-if="kbId" :knowledge-base-id="kbId" :can-edit="canEdit"
+          @open-kb-settings="handleOpenKBSettings" />
+      </div>
+
+      <template v-if="(activeKbTab === 'documents' && !isCodeWiki) || !isWiki">
         <div class="knowledge-main">
           <KbFolderTree v-if="showFolderTree && !folderTreeCollapsed" :tree="folderTree" :selected-path="selectedFolderPath"
             :loading="folderTreeLoading" :can-edit="canEdit"

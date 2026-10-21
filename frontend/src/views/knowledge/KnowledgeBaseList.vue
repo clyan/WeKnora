@@ -251,12 +251,12 @@
                 <div class="bottom-left">
                   <div class="feature-badges">
                     <t-tooltip
-                      :content="kb.type === 'faq' ? $t('knowledgeEditor.basic.typeFAQ') : $t('knowledgeEditor.basic.typeDocument')"
+                      :content="kb.type === 'faq' ? $t('knowledgeEditor.basic.typeFAQ') : kb.type === 'code_wiki' ? $t('knowledgeEditor.basic.typeCodeWiki') : $t('knowledgeEditor.basic.typeDocument')"
                       placement="top">
                       <div class="feature-badge"
-                        :class="{ 'type-document': (kb.type || 'document') === 'document', 'type-faq': kb.type === 'faq' }">
-                        <t-icon :name="kb.type === 'faq' ? 'chat-bubble-help' : 'folder'" size="14px" />
-                        <span class="badge-count">{{ kb.type === 'faq' ? (kb.chunk_count || 0) : (kb.knowledge_count ||
+                        :class="{ 'type-document': (kb.type || 'document') === 'document', 'type-faq': kb.type === 'faq', 'type-codewiki': kb.type === 'code_wiki' }">
+                        <t-icon :name="kb.type === 'faq' ? 'chat-bubble-help' : kb.type === 'code_wiki' ? 'code' : 'folder'" size="14px" />
+                        <span class="badge-count">{{ kb.type === 'code_wiki' ? (kb.repository_count || 0) : kb.type === 'faq' ? (kb.chunk_count || 0) : (kb.knowledge_count ||
                           0) }}</span>
                         <t-icon v-if="kb.isProcessing" name="loading" size="12px" class="processing-icon" />
                       </div>
@@ -484,12 +484,12 @@
                 <div class="bottom-left">
                   <div class="feature-badges">
                     <t-tooltip
-                      :content="kb.type === 'faq' ? $t('knowledgeEditor.basic.typeFAQ') : $t('knowledgeEditor.basic.typeDocument')"
+                      :content="kb.type === 'faq' ? $t('knowledgeEditor.basic.typeFAQ') : kb.type === 'code_wiki' ? $t('knowledgeEditor.basic.typeCodeWiki') : $t('knowledgeEditor.basic.typeDocument')"
                       placement="top">
                       <div class="feature-badge"
-                        :class="{ 'type-document': (kb.type || 'document') === 'document', 'type-faq': kb.type === 'faq' }">
-                        <t-icon :name="kb.type === 'faq' ? 'chat-bubble-help' : 'folder'" size="14px" />
-                        <span class="badge-count">{{ kb.type === 'faq' ? (kb.chunk_count || 0) : (kb.knowledge_count ||
+                        :class="{ 'type-document': (kb.type || 'document') === 'document', 'type-faq': kb.type === 'faq', 'type-codewiki': kb.type === 'code_wiki' }">
+                        <t-icon :name="kb.type === 'faq' ? 'chat-bubble-help' : kb.type === 'code_wiki' ? 'code' : 'folder'" size="14px" />
+                        <span class="badge-count">{{ kb.type === 'code_wiki' ? (kb.repository_count || 0) : kb.type === 'faq' ? (kb.chunk_count || 0) : (kb.knowledge_count ||
                           0) }}</span>
                         <t-icon v-if="kb.isProcessing" name="loading" size="12px" class="processing-icon" />
                       </div>
@@ -848,7 +848,7 @@ interface KB {
   pinned_at?: string;
   embedding_model_id?: string;
   summary_model_id?: string;
-  type?: 'document' | 'faq';
+  type?: 'document' | 'faq' | 'code_wiki';
   showMore?: boolean;
   vlm_config?: { enabled?: boolean; model_id?: string };
   extract_config?: { enabled?: boolean };
@@ -857,6 +857,9 @@ interface KB {
   question_generation_config?: { enabled?: boolean; question_count?: number };
   knowledge_count?: number;
   chunk_count?: number;
+  // Code wiki KBs badge with the bound repository count instead of the
+  // document count (plan §6.2).
+  repository_count?: number;
   isProcessing?: boolean;
   processing_count?: number;
   share_count?: number;
@@ -2645,6 +2648,16 @@ const handleUploadFinishedEvent = (event: Event) => {
   &.type-faq {
     background: rgba(0, 82, 217, 0.08);
     color: var(--td-brand-color);
+    width: auto;
+    padding: 0 6px;
+    gap: 3px;
+  }
+
+  // Code wiki badge: repo count instead of document count (plan §6.2:
+  // 不用文档数代表代码索引进度).
+  &.type-codewiki {
+    background: rgba(0, 168, 112, 0.08);
+    color: var(--td-success-color);
     width: auto;
     padding: 0 6px;
     gap: 3px;

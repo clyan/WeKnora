@@ -83,7 +83,7 @@ export interface KnowledgeBaseStoreView {
 export function createKnowledgeBase(data: {
   name: string;
   description?: string;
-  type?: 'document' | 'faq';
+  type?: 'document' | 'faq' | 'code_wiki';
   chunking_config?: any;
   embedding_model_id?: string;
   summary_model_id?: string;
@@ -118,6 +118,14 @@ export function createKnowledgeBase(data: {
     content_instructions?: string;
     extraction_instructions?: string;
   };
+  // Code wiki KB settings (type='code_wiki' only). Generation model and
+  // custom instructions reuse wiki_config above.
+  code_wiki_config?: {
+    languages?: string[];
+    max_pages_per_run?: number;
+    max_model_calls_per_run?: number;
+    run_timeout_minutes?: number;
+  };
   indexing_strategy?: {
     vector_enabled: boolean;
     keyword_enabled: boolean;
@@ -149,6 +157,12 @@ export function updateKnowledgeBase(id: string, data: {
       extraction_granularity?: 'focused' | 'standard' | 'exhaustive';
       content_instructions?: string;
       extraction_instructions?: string;
+    };
+    code_wiki_config?: {
+      languages?: string[];
+      max_pages_per_run?: number;
+      max_model_calls_per_run?: number;
+      run_timeout_minutes?: number;
     };
     auto_tag_config?: { enabled: boolean; model_id?: string; max_tags?: number; skip_if_tagged?: boolean };
     indexing_strategy?: {

@@ -71,12 +71,14 @@
                         >
                           <t-radio-button value="document">{{ $t('knowledgeEditor.basic.typeDocument') }}</t-radio-button>
                           <t-radio-button value="faq">{{ $t('knowledgeEditor.basic.typeFAQ') }}</t-radio-button>
+                          <t-radio-button value="code_wiki">{{ $t('knowledgeEditor.basic.typeCodeWiki') }}</t-radio-button>
                         </t-radio-group>
                         <p class="form-tip">{{ $t('knowledgeEditor.basic.typeDescription') }}</p>
                       </div>
 
-                      <!-- 索引策略 (紧跟类型选择) -->
-                      <div v-if="!isFAQ" class="form-item">
+                      <!-- 索引策略 (紧跟类型选择)。代码 Wiki 的源码不进入文档分块
+                           流程：向量/关键词默认关闭且不可强制开启，Wiki 阅读固定开启。 -->
+                      <div v-if="!isFAQ && !isCodeWiki" class="form-item">
                         <label class="form-label required">{{ $t('knowledgeEditor.indexing.title') }}</label>
                         <p class="form-tip">{{ $t('knowledgeEditor.indexing.description') }}</p>
                         <div class="indexing-checks" :class="{ 'is-locked': isIndexingLocked }"
@@ -502,7 +504,7 @@ const props = defineProps<{
   visible: boolean
   mode: 'create' | 'edit'
   kbId?: string
-  initialType?: 'document' | 'faq'
+  initialType?: 'document' | 'faq' | 'code_wiki'
 }>()
 
 // Emits
@@ -611,6 +613,13 @@ const navItems = computed(() => {
   ]
   if (formData.value?.type === 'faq') {
     items.push({ key: 'faq', icon: 'help-circle', label: t('knowledgeEditor.sidebar.faq') })
+  } else if (formData.value?.type === 'code_wiki') {
+    // Code wiki KBs: repositories/provider/run management lives on the KB
+    // detail page's CodeWiki panel, not in the editor; keep the editor lean
+    // (basic + models + vectorStore + datasource for the GitLab connection).
+    if (editorMode.value === 'edit' && activeKbId.value) {
+      items.push({ key: 'datasource', icon: 'cloud-download', label: t('knowledgeEditor.sidebar.datasource'), badge: dsCount.value || undefined })
+    }
   } else {
     items.push(
       { key: 'parser', icon: 'file-search', label: t('settings.parserEngine') },
@@ -675,9 +684,10 @@ const advancedSettingsRef = ref<InstanceType<typeof KBAdvancedSettings>>()
 // 表单数据
 const formData = ref<any>(null)
 const isFAQ = computed(() => formData.value?.type === 'faq')
+const isCodeWiki = computed(() => formData.value?.type === 'code_wiki')
 
 const kbCreateNeedsEmbedding = computed(() => {
-  if (!formData.value || formData.value.type === 'faq') return false
+  if (!formData.value || formData.value.type === 'faq' || formData.value.type === 'code_wiki') return false
   const s = formData.value.indexingStrategy
   return Boolean(s?.vectorEnabled || s?.keywordEnabled)
 })
@@ -705,6 +715,19 @@ watch(
       if (!['basic', 'models', 'faq'].includes(currentSection.value)) {
         currentSection.value = 'faq'
       }
+    } else if (newType === 'code_wiki') {
+      // Code wiki defaults: wiki reading on (server also enforces this),
+      // document vector/keyword indexing off — source never enters the
+      // document chunk pipeline and generation needs no embedding model.
+      if (formData.value.indexingStrategy) {
+        formData.value.indexingStrategy.wikiEnabled = true
+        formData.value.indexingStrategy.vectorEnabled = false
+        formData.value.indexingStrategy.keywordEnabled = false
+        formData.value.indexingStrategy.graphEnabled = false
+      }
+      if (!['basic', 'models', 'vectorStore', 'datasource'].includes(currentSection.value)) {
+        currentSection.value = 'basic'
+      }
     } else if (oldType === 'faq' && currentSection.value === 'faq') {
       currentSection.value = 'basic'
     }
@@ -712,7 +735,7 @@ watch(
 )
 
 // 初始化表单数据
-const initFormData = (type: 'document' | 'faq' = 'document') => {
+const initFormData = (type: 'document' | 'faq' | 'code_wiki' = 'document') => {
   return {
     type,
     name: '',
@@ -788,6 +811,12 @@ const initFormData = (type: 'document' | 'faq' = 'document') => {
       contentInstructions: '',
       extractionInstructions: '',
     },
+    codeWikiConfig: {
+      languages: [] as string[],
+      maxPagesPerRun: 0,
+      maxModelCallsPerRun: 0,
+      runTimeoutMinutes: 0,
+    },
     indexingStrategy: {
       vectorEnabled: true,
       keywordEnabled: true,
@@ -854,7 +883,7 @@ const loadKBData = async (
     kbTenantId.value = Number((kb as any).tenant_id || 0)
 
     // 设置表单数据
-    const kbType = (kb.type as 'document' | 'faq') || 'document'
+    const kbType = (kb.type as 'document' | 'faq' | 'code_wiki') || 'document'
     formData.value = {
       type: kbType,
       name: kb.name || '',
@@ -933,6 +962,12 @@ const loadKBData = async (
         ) as 'focused' | 'standard' | 'exhaustive',
         contentInstructions: kb.wiki_config?.content_instructions || '',
         extractionInstructions: kb.wiki_config?.extraction_instructions || '',
+      },
+      codeWikiConfig: {
+        languages: kb.code_wiki_config?.languages || [],
+        maxPagesPerRun: kb.code_wiki_config?.max_pages_per_run || 0,
+        maxModelCallsPerRun: kb.code_wiki_config?.max_model_calls_per_run || 0,
+        runTimeoutMinutes: kb.code_wiki_config?.run_timeout_minutes || 0,
       },
       indexingStrategy: {
         vectorEnabled: kb.indexing_strategy?.vector_enabled ?? true,
@@ -1302,6 +1337,17 @@ const buildSubmitData = () => {
       extraction_granularity: formData.value.wikiConfig?.extractionGranularity || 'standard',
       content_instructions: formData.value.wikiConfig?.contentInstructions || '',
       extraction_instructions: formData.value.wikiConfig?.extractionInstructions || '',
+    }
+  }
+
+  // Code wiki budgets/languages. Generation model + custom instructions
+  // reuse wiki_config above (plan §3.1: 不维护两套相同设置).
+  if (formData.value.type === 'code_wiki') {
+    data.code_wiki_config = {
+      languages: formData.value.codeWikiConfig?.languages || [],
+      max_pages_per_run: formData.value.codeWikiConfig?.maxPagesPerRun || 0,
+      max_model_calls_per_run: formData.value.codeWikiConfig?.maxModelCallsPerRun || 0,
+      run_timeout_minutes: formData.value.codeWikiConfig?.runTimeoutMinutes || 0,
     }
   }
 

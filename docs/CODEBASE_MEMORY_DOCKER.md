@@ -4,6 +4,26 @@
 `0.12.1`，支持 amd64 / arm64，并校验发行包的 SHA-256。源码及索引操作
 使用应用已有的 `appuser`，无需开放额外端口。
 
+## 工具安装 ≠ 业务集成
+
+本文档描述的是**工具安装**：把 `codebase-memory-mcp` 可执行文件装进
+镜像并挂载缓存卷。**业务集成**由应用内的 Code Wiki 功能完成（见
+[CODE_WIKI_IMPLEMENTATION_PLAN.md](CODE_WIKI_IMPLEMENTATION_PLAN.md) 与
+`internal/codebase/`）：
+
+- 创建 `code_wiki` 类型知识库后，在"代码仓库"面板配置 GitLab 连接并
+  绑定仓库；后端按固定 commit 下载归档、过滤解包为不可变快照，再调用
+  本 CLI 建立/校验分析产物。
+- 内置 Provider 通过 `WEKNORA_CODEBASE_CLI_PATH` 定位可执行文件（默认
+  `codebase-memory-mcp`，即本镜像安装的版本）；开发机自装时指向本地
+  路径并对齐版本。
+- 快照根目录默认 `/data/code-wiki`（可用 `WEKNORA_CODE_WIKI_DATA_DIR`
+  覆盖）；归档解包与文件数量上限可用
+  `WEKNORA_CODE_WIKI_MAX_ARCHIVE_MB` / `WEKNORA_CODE_WIKI_MAX_UNPACKED_MB` /
+  `WEKNORA_CODE_WIKI_MAX_FILES` 调整。
+- 选择自定义 MCP Provider 时不依赖本 CLI；远程服务如何获得代码见计划
+  §4.3（共享目录 / 导入 / 绑定外部索引）。
+
 ## 构建和启动
 
 ```bash
