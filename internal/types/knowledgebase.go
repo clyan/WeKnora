@@ -111,6 +111,10 @@ type KnowledgeBase struct {
 	AutoTagConfig *AutoTagConfig `yaml:"auto_tag_config" json:"auto_tag_config" gorm:"type:json"`
 	// WikiConfig stores wiki-specific configuration (only for wiki type knowledge bases)
 	WikiConfig *WikiConfig `yaml:"wiki_config"             json:"wiki_config"             gorm:"column:wiki_config;type:json"`
+	// CodeWikiConfig stores code-wiki-specific configuration (only for
+	// code_wiki type knowledge bases). Generation model and custom
+	// instructions reuse WikiConfig rather than being duplicated here.
+	CodeWikiConfig *CodeWikiConfig `yaml:"code_wiki_config"       json:"code_wiki_config"       gorm:"column:code_wiki_config;type:json"`
 	// IndexingStrategy controls which indexing pipelines are active for this knowledge base.
 	// Pipelines: vector search, keyword search, wiki generation, knowledge graph extraction.
 	IndexingStrategy IndexingStrategy `yaml:"indexing_strategy"       json:"indexing_strategy"       gorm:"column:indexing_strategy;type:json"`
@@ -158,6 +162,8 @@ type KnowledgeBaseConfig struct {
 	FAQConfig *FAQConfig `yaml:"faq_config"              json:"faq_config"`
 	// Wiki configuration (only for wiki-enabled knowledge bases)
 	WikiConfig *WikiConfig `yaml:"wiki_config"             json:"wiki_config"`
+	// Code wiki configuration (only for code_wiki knowledge bases)
+	CodeWikiConfig *CodeWikiConfig `yaml:"code_wiki_config"       json:"code_wiki_config"`
 	// AutoTagConfig controls optional automatic association of existing KB tags.
 	AutoTagConfig *AutoTagConfig `yaml:"auto_tag_config" json:"auto_tag_config"`
 	// IndexingStrategy controls which indexing pipelines are active.
@@ -757,6 +763,24 @@ func (kb *KnowledgeBase) EnsureDefaults() {
 		}
 	}
 
+	// Code wiki KBs: normalize code-wiki config and drop configs that
+	// belong to other types. The wiki reading pipeline is forced on below
+	// (the customer wiki IS the product). Vector/keyword document indexing
+	// stays user-controllable and defaults OFF for fresh KBs: source code
+	// never enters the document chunk pipeline, so generation works without
+	// an embedding model.
+	if kb.Type == KnowledgeBaseTypeCodeWiki {
+		if kb.CodeWikiConfig == nil {
+			kb.CodeWikiConfig = &CodeWikiConfig{}
+		}
+		kb.CodeWikiConfig.Normalize()
+		if kb.IndexingStrategy.IsZero() {
+			kb.IndexingStrategy = IndexingStrategy{WikiEnabled: true}
+		}
+	} else {
+		kb.CodeWikiConfig = nil
+	}
+
 	// Ensure IndexingStrategy has defaults.
 	// For existing rows where indexing_strategy is NULL, GORM Scan() returns
 	// DefaultIndexingStrategy() (vector+keyword=true). This block handles the
@@ -767,6 +791,11 @@ func (kb *KnowledgeBase) EnsureDefaults() {
 	// Sync legacy ExtractConfig.Enabled → IndexingStrategy.GraphEnabled
 	if kb.ExtractConfig != nil && kb.ExtractConfig.Enabled && !kb.IndexingStrategy.GraphEnabled {
 		kb.IndexingStrategy.GraphEnabled = true
+	}
+	// Code wiki KBs always expose wiki reading; the wiki browser is the
+	// primary reading surface for customer documentation.
+	if kb.Type == KnowledgeBaseTypeCodeWiki {
+		kb.IndexingStrategy.WikiEnabled = true
 	}
 }
 
@@ -785,6 +814,8 @@ type KBCapabilities struct {
 	Graph bool `json:"graph"`
 	// FAQ means the KB is a FAQ-type KB (Q/A pairs).
 	FAQ bool `json:"faq"`
+	// CodeWiki means the KB is a code-wiki KB (multi-repo customer project).
+	CodeWiki bool `json:"code_wiki"`
 }
 
 // Capabilities returns the computed capability flags for this KB.
@@ -794,11 +825,12 @@ func (kb *KnowledgeBase) Capabilities() KBCapabilities {
 		return KBCapabilities{}
 	}
 	return KBCapabilities{
-		Vector:  kb.IsVectorEnabled(),
-		Keyword: kb.IsKeywordEnabled(),
-		Wiki:    kb.IsWikiEnabled(),
-		Graph:   kb.IsGraphEnabled(),
-		FAQ:     kb.Type == KnowledgeBaseTypeFAQ,
+		Vector:   kb.IsVectorEnabled(),
+		Keyword:  kb.IsKeywordEnabled(),
+		Wiki:     kb.IsWikiEnabled(),
+		Graph:    kb.IsGraphEnabled(),
+		FAQ:      kb.Type == KnowledgeBaseTypeFAQ,
+		CodeWiki: kb.IsCodeWiki(),
 	}
 }
 

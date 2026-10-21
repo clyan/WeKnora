@@ -42,6 +42,11 @@ const (
 	QueueSync           = "sync"
 	QueueMaintenance    = "low"
 	QueueWiki           = "wiki"
+	// QueueCodeWiki carries code wiki snapshot sync (GitLab archive download
+	// + provider artifact preparation) and document generation runs. It sits
+	// in the wiki pool: generation is model-heavy like wiki ingest, and sync
+	// is a long background job whose latency nobody interactive waits on.
+	QueueCodeWiki = "codewiki"
 	// QueueMemory carries debounced long-term memory distillation. It sits in
 	// the enrichment pool because it is a background LLM call whose latency
 	// nobody is waiting on.
@@ -85,6 +90,9 @@ var queueDefinitions = []QueueDefinition{
 		TypeKnowledgeListDelete, TypeKnowledgeListReparse, TypeKnowledgeMove,
 	}},
 	{Name: QueueWiki, Pool: WorkerPoolWiki, Weight: 1, TaskTypes: []string{TypeWikiIngest, TypeWikiFinalize}},
+	{Name: QueueCodeWiki, Pool: WorkerPoolWiki, Weight: 1, TaskTypes: []string{
+		TypeCodeWikiSync, TypeCodeWikiGenerate,
+	}},
 }
 
 // QueueDefinitions returns a copy so callers cannot mutate global topology.
@@ -252,6 +260,8 @@ const (
 	TypeWikiIngest               = "wiki:ingest"                // Wiki 页面同步任务
 	TypeWikiFinalize             = "wiki:finalize"              // Wiki KB 级收尾任务（防抖：索引重建/死链清理/交叉链接）
 	TypeTemporaryDocumentProcess = "temporary_document:process" // 会话临时文档解析任务
+	TypeCodeWikiSync             = "codewiki:sync"              // Code Wiki 仓库快照与分析产物准备任务
+	TypeCodeWikiGenerate         = "codewiki:generate"          // Code Wiki 文档生成批次任务
 	// TypeMemoryExtract 长期记忆抽取任务（会话轮次防抖后异步执行）
 	TypeMemoryExtract = "memory:extract"
 )
@@ -275,6 +285,32 @@ type MemoryExtractPayload struct {
 	// is what the settings UI promises.
 	ChatModelID string `json:"chat_model_id,omitempty"`
 	Language    string `json:"language,omitempty"`
+}
+
+// CodeWikiSyncPayload backs TypeCodeWikiSync: prepare snapshots and analysis
+// artifacts for one or more repository bindings. Scope travels in the payload
+// for the same reason as MemoryExtractPayload — workers start from a bare
+// context.
+type CodeWikiSyncPayload struct {
+	TracingContext
+	TenantID         uint64 `json:"tenant_id"`
+	KnowledgeBaseID  string `json:"knowledge_base_id"`
+	// RepositoryIDs selects specific bindings; empty = every enabled binding.
+	RepositoryIDs []string `json:"repository_ids,omitempty"`
+	// SyncLogID links the run to the data source sync log row.
+	SyncLogID string `json:"sync_log_id,omitempty"`
+	Initiator TaskInitiator `json:"initiator,omitempty"`
+}
+
+// CodeWikiGeneratePayload backs TypeCodeWikiGenerate: execute one
+// generation run end-to-end (freeze manifest → analyze → plan → generate →
+// validate → stage).
+type CodeWikiGeneratePayload struct {
+	TracingContext
+	TenantID        uint64 `json:"tenant_id"`
+	KnowledgeBaseID string `json:"knowledge_base_id"`
+	RunID           string `json:"run_id"`
+	Initiator       TaskInitiator `json:"initiator,omitempty"`
 }
 
 // ExtractChunkPayload represents the extract chunk task payload

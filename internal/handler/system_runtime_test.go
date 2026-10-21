@@ -240,7 +240,7 @@ func TestGetRuntimeQueuesReportsIsolatedPoolCapacity(t *testing.T) {
 		types.WorkerPoolEnrichment:  {12, 5},
 		types.WorkerPoolMaintenance: {4, 2},
 		types.WorkerPoolShared:      {6, 7},
-		types.WorkerPoolWiki:        {8, 1},
+		types.WorkerPoolWiki:        {8, 2}, // wiki + codewiki queues
 	}
 	if len(response.Pools) != len(want) {
 		t.Fatalf("pool count = %d, want %d", len(response.Pools), len(want))

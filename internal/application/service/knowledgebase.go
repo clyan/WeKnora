@@ -134,6 +134,13 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 	if uid, ok := types.UserIDFromContext(ctx); ok && !types.IsSyntheticUserID(uid) {
 		kb.CreatorID = uid
 	}
+	// Reject unknown types: an empty type is legal (EnsureDefaults
+	// normalizes it to document), but a typo'd type would create a KB
+	// invisible to every type-filtered surface (list, capabilities,
+	// editor).
+	if kb.Type != "" && !types.IsValidKnowledgeBaseType(kb.Type) {
+		return nil, apperrors.NewBadRequestError(fmt.Sprintf("unknown knowledge base type %q", kb.Type))
+	}
 	kb.EnsureDefaults()
 	applyTenantDefaultStorageProvider(ctx, kb)
 	if err := s.applyAndValidateStorageBackend(ctx, kb); err != nil {
@@ -531,6 +538,12 @@ func (s *knowledgeBaseService) UpdateKnowledgeBase(ctx context.Context,
 		}
 		if config.WikiConfig != nil {
 			kb.WikiConfig = config.WikiConfig
+		}
+		if config.CodeWikiConfig != nil {
+			// Only meaningful on code_wiki KBs; EnsureDefaults drops it
+			// elsewhere. Normalization clamps budgets into range.
+			config.CodeWikiConfig.Normalize()
+			kb.CodeWikiConfig = config.CodeWikiConfig
 		}
 		if config.AutoTagConfig != nil {
 			config.AutoTagConfig.Normalize()

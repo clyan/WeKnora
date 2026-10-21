@@ -51,6 +51,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/application/service/memory"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
+	"github.com/Tencent/WeKnora/internal/codebase"
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/database"
@@ -177,6 +178,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewDataSourceRepository))
 	must(container.Provide(repository.NewSyncLogRepository))
 	must(container.Provide(repository.NewWikiPageRepository))
+	must(container.Provide(repository.NewCodeWikiRepository))
 	must(container.Provide(repository.NewMemoryRepository))
 	must(container.Provide(repository.NewTaskPendingOpsRepository))
 	must(container.Provide(repository.NewTaskDeadLetterRepository))
@@ -184,6 +186,11 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// MCP manager for managing MCP client connections
 	logger.Debugf(ctx, "[Container] Registering MCP manager...")
 	must(container.Provide(mcp.NewMCPManager))
+
+	// Codebase analysis provider registry (builtin CLI + custom MCP adapters)
+	must(container.Provide(func(mcpMgr *mcp.MCPManager, mcpRepo interfaces.MCPServiceRepository) *codebase.Registry {
+		return codebase.NewRegistry(mcpMgr, mcpRepo)
+	}))
 	must(container.Provide(mcp.NewOAuthManager))
 
 	// Sandbox manager fallback is disabled; executable backends are resolved
@@ -245,6 +252,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewCustomAgentService))
 	must(container.Provide(service.NewUserResourceFavoriteService))
 	must(container.Provide(service.NewWikiPageService))
+	must(container.Provide(service.NewCodeWikiService))
 	must(container.Provide(service.NewWikiIngestService, dig.Name("wikiIngest")))
 	must(container.Provide(service.NewWikiLintService))
 	must(container.Provide(service.NewEmbedChannelService))
@@ -356,6 +364,13 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(datasource.NewScheduler))
 	must(container.Provide(service.NewDataSourceService))
 	must(container.Invoke(startDataSourceScheduler))
+	// Late wiring: route datasource:sync tasks for code_wiki KBs to the code
+	// wiki service (avoids constructor-parameter churn on DataSourceService).
+	must(container.Invoke(func(dsService interfaces.DataSourceService, codeWiki interfaces.CodeWikiService) {
+		if impl, ok := dsService.(*service.DataSourceService); ok {
+			impl.SetCodeWikiService(codeWiki)
+		}
+	}))
 	logger.Debugf(ctx, "[Container] Data source sync framework registered")
 	must(container.Invoke(startAuditLogRetention))
 	logger.Debugf(ctx, "[Container] Audit log retention runner registered")
@@ -437,6 +452,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(handler.NewDataSourceHandler))
 	// Wiki page handler
 	must(container.Provide(handler.NewWikiPageHandler))
+	// Code wiki handler
+	must(container.Provide(handler.NewCodeWikiHandler))
 	// IM integration
 	logger.Debugf(ctx, "[Container] Registering IM integration...")
 	must(container.Provide(imPkg.NewService))

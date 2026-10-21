@@ -34,6 +34,15 @@ type DataSourceService struct {
 	tenantRepo        interfaces.TenantRepository
 	tagService        interfaces.KnowledgeTagService
 	audit             interfaces.AuditLogService
+	// codeWikiService is optional late wiring (set from the container after
+	// construction) to avoid a constructor-parameter churn; it routes sync
+	// tasks for code_wiki KBs away from the document pipeline.
+	codeWikiService interfaces.CodeWikiService
+}
+
+// SetCodeWikiService wires the code wiki service for KB-type sync routing.
+func (s *DataSourceService) SetCodeWikiService(svc interfaces.CodeWikiService) {
+	s.codeWikiService = svc
 }
 
 // NewDataSourceService creates a new data source service
@@ -84,9 +93,24 @@ func (s *DataSourceService) CreateDataSource(ctx context.Context, ds *types.Data
 		return nil, err
 	}
 
+	// Code-mode marker: a data source created under a code_wiki KB syncs
+	// repository snapshots, not documents. The marker is informational —
+	// routing is decided by KB type — but it makes the intent visible in
+	// the config UI and lets validation skip document-mode requirements.
+	codeMode := kb.IsCodeWiki() && ds.Type == types.ConnectorTypeGitLab
+
 	// Validate configuration
 	if cfg, err := ds.ParseConfig(); err == nil && cfg != nil {
 		cfg.StripNonSecretCredentials(ds.Type)
+		if codeMode {
+			// Code mode: the binding table owns the project set; a
+			// settings.projects list is neither required nor maintained.
+			if cfg.Settings == nil {
+				cfg.Settings = map[string]interface{}{}
+			}
+			cfg.Settings["sync_target"] = "code_wiki"
+			delete(cfg.Settings, "projects")
+		}
 		if blob, err := cfg.ToJSON(); err == nil {
 			ds.Config = blob
 		}
@@ -628,6 +652,35 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 	}
 
 	wasPaused := ds.Status == types.DataSourceStatusPaused
+
+	// Code wiki KBs never enter the document pipeline: sync branches to the
+	// code snapshot task BEFORE any connector fetch (plan §2: 在 ProcessSync
+	// 的连接器抓取前，按知识库类型分流到代码快照任务). Source code must not
+	// flow into the document chunk pipeline.
+	if kb.IsCodeWiki() {
+		if s.codeWikiService == nil {
+			syncLog.Status = types.SyncLogStatusFailed
+			syncLog.FinishedAt = timePtr(time.Now().UTC())
+			syncLog.ErrorMessage = "code wiki sync is not available in this build"
+			_ = s.syncLogRepo.Update(ctx, syncLog)
+			return nil
+		}
+		if err := s.codeWikiService.RouteDataSourceSync(ctx, ds, syncLog.ID); err != nil {
+			logger.Errorf(ctx, "code wiki sync routing failed: ds=%s err=%v", ds.ID, err)
+			syncLog.Status = types.SyncLogStatusFailed
+			syncLog.FinishedAt = timePtr(time.Now().UTC())
+			syncLog.ErrorMessage = err.Error()
+			_ = s.syncLogRepo.Update(ctx, syncLog)
+			if !wasPaused {
+				ds.Status = types.DataSourceStatusError
+			}
+			ds.ErrorMessage = syncLog.ErrorMessage
+			_ = s.dsRepo.Update(ctx, ds)
+		}
+		// The sync log is finalized by the code wiki sync handler once the
+		// snapshot task completes; this task is done either way.
+		return nil
+	}
 
 	// Get connector
 	connector, err := s.connectorRegistry.Get(ds.Type)

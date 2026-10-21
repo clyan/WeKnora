@@ -846,6 +846,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
 		vector_store_id VARCHAR(36),
 		storage_backend_id VARCHAR(36),
     wiki_config TEXT,
+    code_wiki_config TEXT,
     indexing_strategy TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

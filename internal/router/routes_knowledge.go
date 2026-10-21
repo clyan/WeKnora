@@ -256,6 +256,45 @@ func RegisterKnowledgeBaseActivityRoutes(r *gin.RouterGroup, auditHandler *handl
 		g.OwnedKBOrAdmin(), g.KBAccessRead("id"), auditHandler.ListKnowledgeBaseActivity)
 }
 
+// RegisterCodeWikiRoutes registers the code wiki management API.
+//
+// The URL prefix matches the wiki routes' singular /knowledgebase/:kb_id
+// convention. Access matrix mirrors wiki pages: reads are Viewer+ gated by
+// KBAccessRead; analysis-profile/repository/sync/run/publish mutations are
+// OwnedWikiKBOrAdmin + KBAccessWrite. JWT-only in the first version — no
+// API-key capability is declared for code wiki management yet.
+func RegisterCodeWikiRoutes(r *gin.RouterGroup, codeWikiHandler *handler.CodeWikiHandler, g *rbacGuards) {
+	if codeWikiHandler == nil {
+		return
+	}
+	cw := r.Group("/knowledgebase/:kb_id/code-wiki")
+	{
+		// Analysis provider profile: read Viewer+, configure/test requires
+		// write (tests call out to the configured provider/service).
+		cw.GET("/analysis-profile", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.GetAnalysisProfile)
+		cw.PUT("/analysis-profile", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.UpdateAnalysisProfile)
+		cw.POST("/analysis-profile/test", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.TestAnalysisProfile)
+
+		// Repository bindings.
+		cw.GET("/repositories", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListRepositories)
+		cw.POST("/repositories", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.CreateRepository)
+		cw.PATCH("/repositories/:id", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.UpdateRepository)
+		cw.DELETE("/repositories/:id", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.DeleteRepository)
+
+		// Sync (async, 202) and generation runs.
+		cw.POST("/sync", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.SyncRepositories)
+		cw.GET("/runs", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListRuns)
+		cw.POST("/runs", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.CreateRun)
+		cw.GET("/runs/:id", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.GetRun)
+		cw.POST("/runs/:id/cancel", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.CancelRun)
+		cw.POST("/runs/:id/retry", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.RetryRun)
+		cw.POST("/runs/:id/publish", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.PublishRun)
+
+		// Evidence reading (cited source excerpt at a frozen commit).
+		cw.GET("/evidence/:id", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.GetEvidence)
+	}
+}
+
 // RegisterKnowledgeTagRoutes 注册知识库标签相关路由。
 //
 // Tags are KB metadata: Viewer reads, Contributor writes. Per-KB

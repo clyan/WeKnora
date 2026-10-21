@@ -38,6 +38,7 @@ type AsynqTaskParams struct {
 	KnowledgeBaseService interfaces.KnowledgeBaseService
 	TagService           interfaces.KnowledgeTagService
 	DataSourceService    interfaces.DataSourceService
+	CodeWikiService      interfaces.CodeWikiService
 	ChunkExtractor       interfaces.TaskHandler `name:"chunkExtractor"`
 	DataTableSummary     interfaces.TaskHandler `name:"dataTableSummary"`
 	ImageMultimodal      interfaces.TaskHandler `name:"imageMultimodal"`
@@ -312,6 +313,12 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 	// and both land on QueueWiki, so the dedicated wiki pool serves them.
 	mux.HandleFunc(types.TypeWikiIngest, params.WikiIngest.Handle)
 	mux.HandleFunc(types.TypeWikiFinalize, params.WikiIngest.Handle)
+
+	// Register code wiki handlers (snapshot sync + generation runs). Both
+	// land on QueueCodeWiki in the wiki pool — generation is model-heavy
+	// like wiki ingest; sync is a long background job.
+	mux.HandleFunc(types.TypeCodeWikiSync, params.CodeWikiService.ProcessCodeWikiSync)
+	mux.HandleFunc(types.TypeCodeWikiGenerate, params.CodeWikiService.ProcessCodeWikiGenerate)
 
 	// Register long-term memory distillation handler
 	mux.HandleFunc(types.TypeMemoryExtract, params.MemoryService.Handle)
