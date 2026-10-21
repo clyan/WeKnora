@@ -60,3 +60,5 @@ miniprogram/project.private.config.json
 
 # Staging dir for the Docker sandbox self-check probe (removed after each run)
 .weknora-sandbox-check-*
+# Locally downloaded release archives for the optional codebase Docker image.
+/.local-data/codebase-memory/

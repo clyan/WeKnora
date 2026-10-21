@@ -1,5 +1,29 @@
 # 开发环境配置 - 只启动基础设施服务，app 和 frontend 在本地运行
 services:
+  # Code indexing tools for host-side development. The upstream MCP server
+  # uses stdio; use compose exec for CLI calls (no HTTP endpoint is exposed).
+  codebase-memory:
+    image: weknora-app-codebase:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.app-codebase
+      args:
+        WEKNORA_BASE_IMAGE: wechatopenai/weknora-app:${WEKNORA_VERSION:-latest}
+        CODEBASE_MEMORY_VERSION: ${CODEBASE_MEMORY_VERSION:-0.12.1}
+        CODEBASE_MEMORY_PACKAGE_SOURCE: ${CODEBASE_MEMORY_PACKAGE_SOURCE:-download}
+    container_name: WeKnora-codebase-memory-dev
+    entrypoint: ["/app/scripts/docker-entrypoint.sh"]
+    command: ["codebase-memory-mcp"]
+    stdin_open: true
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:ro
+      - codebase-memory-cache-dev:/home/appuser/.cache/codebase-memory-mcp
+      - codebase-repositories-dev:/data/files
+    networks:
+      - WeKnora-network-dev
+    restart: unless-stopped
+
   # 只启动依赖的基础设施服务
   postgres:
     image: paradedb/paradedb:v0.22.2-pg17
@@ -573,6 +597,8 @@ networks:
     driver: bridge
 
 volumes:
+  codebase-memory-cache-dev:
+  codebase-repositories-dev:
   postgres-data-dev:
   redis_data_dev:
   minio_data_dev:

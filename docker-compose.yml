@@ -27,19 +27,21 @@ services:
     restart: unless-stopped
 
   app:
-    image: wechatopenai/weknora-app:${WEKNORA_VERSION:-latest}
+    image: weknora-app-codebase:local
     build:
       context: .
-      dockerfile: docker/Dockerfile.app
+      dockerfile: docker/Dockerfile.app-codebase
       args:
-        - APK_MIRROR_ARG=${APK_MIRROR_ARG:-}
-        - WITH_ANYDOC=${WITH_ANYDOC:-1}
+        WEKNORA_BASE_IMAGE: wechatopenai/weknora-app:${WEKNORA_VERSION:-latest}
+        CODEBASE_MEMORY_VERSION: ${CODEBASE_MEMORY_VERSION:-0.12.1}
+        CODEBASE_MEMORY_PACKAGE_SOURCE: ${CODEBASE_MEMORY_PACKAGE_SOURCE:-download}
     container_name: WeKnora-app
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:
       - data-files:/data/files
       - docreader-tmp:/tmp/docreader:ro
+      - codebase-memory-cache:/home/appuser/.cache/codebase-memory-mcp
       - ./config/config.yaml:/app/config/config.yaml
       # Docker 沙箱默认关闭（见 WEKNORA_SANDBOX_DOCKER_ENABLED）。需要本机 daemon 时
       # 同时设 true 并挂载实际 socket——这等同宿主机 root，仅私有化单机。
@@ -1021,6 +1023,7 @@ networks:
 volumes:
   postgres-data:
   data-files:
+  codebase-memory-cache:
   docreader-tmp:
   minio_data:
   neo4j-data:

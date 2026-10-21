@@ -1,0 +1,65 @@
+# Extend the deployed application image without rebuilding Go/anydoc.
+ARG WEKNORA_BASE_IMAGE=wechatopenai/weknora-app:latest
+ARG CODEBASE_MEMORY_PACKAGE_SOURCE=download
+FROM ${WEKNORA_BASE_IMAGE} AS codebase-base
+
+USER root
+ARG CODEBASE_MEMORY_VERSION=0.12.1
+
+# Portable builds support Debian 12's glibc. Keep indexes owned by the same
+# unprivileged user that runs WeKnora and the CLI.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+FROM codebase-base AS codebase-download
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) cbm_arch=amd64 ;; \
+        arm64) cbm_arch=arm64 ;; \
+        *) echo 'codebase-memory-mcp requires amd64 or arm64' >&2; exit 1 ;; \
+    esac; \
+    cbm_tmp="$(mktemp -d)"; \
+    cbm_archive="codebase-memory-mcp-linux-${cbm_arch}-portable.tar.gz"; \
+    cbm_release="https://github.com/DeusData/codebase-memory-mcp/releases/download/v${CODEBASE_MEMORY_VERSION}"; \
+    cd "$cbm_tmp"; \
+    curl --fail --silent --show-error --http1.1 --location --retry 3 --retry-all-errors --connect-timeout 20 --max-time 600 \
+        "${cbm_release}/${cbm_archive}" -o "$cbm_archive"; \
+    curl --fail --silent --show-error --http1.1 --location --retry 3 --retry-all-errors --connect-timeout 20 --max-time 60 \
+        "${cbm_release}/checksums.txt" -o checksums.txt; \
+    awk -v archive="$cbm_archive" '$2 == archive { print; found=1 } END { if (!found) exit 1 }' \
+        checksums.txt > selected-checksum.txt; \
+    sha256sum --check selected-checksum.txt; \
+    tar -xzf "$cbm_archive"; \
+    install -m 0755 codebase-memory-mcp /usr/local/bin/codebase-memory-mcp; \
+    codebase-memory-mcp --version; \
+    cd /; \
+    rm -rf "$cbm_tmp"
+
+FROM codebase-base AS codebase-local
+# The directory contains only a release archive and checksums.txt (not committed).
+# A bind mount avoids retaining the compressed archive in the final image.
+RUN --mount=type=bind,source=.local-data/codebase-memory,target=/tmp/codebase-memory-package \
+    set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) cbm_arch=amd64 ;; \
+        arm64) cbm_arch=arm64 ;; \
+        *) echo 'codebase-memory-mcp requires amd64 or arm64' >&2; exit 1 ;; \
+    esac; \
+    cd /tmp/codebase-memory-package; \
+    cbm_archive="codebase-memory-mcp-linux-${cbm_arch}-portable.tar.gz"; \
+    awk -v archive="$cbm_archive" '$2 == archive { print; found=1 } END { if (!found) exit 1 }' \
+        checksums.txt | sha256sum --check -; \
+    cbm_tmp="$(mktemp -d)"; \
+    tar -xzf "$cbm_archive" -C "$cbm_tmp"; \
+    install -m 0755 "$cbm_tmp/codebase-memory-mcp" /usr/local/bin/codebase-memory-mcp; \
+    test "$(codebase-memory-mcp --version)" = "codebase-memory-mcp ${CODEBASE_MEMORY_VERSION}"; \
+    rm -rf "$cbm_tmp"
+
+FROM codebase-${CODEBASE_MEMORY_PACKAGE_SOURCE} AS app
+RUN mkdir -p /home/appuser/.cache/codebase-memory-mcp /data/files/code-repositories && \
+    chmod 0700 /home/appuser/.cache/codebase-memory-mcp && \
+    chown -R appuser:appuser /home/appuser/.cache /data/files/code-repositories
+
+# Retain the parent entrypoint, which drops privileges to appuser.
+WORKDIR /app
