@@ -62,6 +62,8 @@ type CodeWikiRepository interface {
 	// DeleteSnapshot soft-deletes a snapshot row (disk cleanup is the
 	// service's job).
 	DeleteSnapshot(ctx context.Context, kbID, id string) error
+	// DeleteSnapshotsByKB soft-deletes every snapshot of a KB.
+	DeleteSnapshotsByKB(ctx context.Context, kbID string) error
 
 	// --- Analysis artifacts ---
 
@@ -82,6 +84,8 @@ type CodeWikiRepository interface {
 	// DeleteArtifactsByProfileVersion removes artifacts for a (repository,
 	// profile version) pair — only artifacts this system created.
 	DeleteArtifactsByProfileVersion(ctx context.Context, repositoryID string, profileVersion int) error
+	// DeleteArtifactsByKB soft-deletes every artifact of a KB.
+	DeleteArtifactsByKB(ctx context.Context, kbID string) error
 
 	// --- Runs ---
 
@@ -107,6 +111,8 @@ type CodeWikiRepository interface {
 	// succeeds only when status is still pending (or the previous lease
 	// expired). Returns false when another worker owns the run.
 	TryAcquireRunLease(ctx context.Context, runID, owner string, ttlSeconds int) (bool, error)
+	// DeleteRunsByKB soft-deletes every run of a KB (KB deletion).
+	DeleteRunsByKB(ctx context.Context, kbID string) error
 
 	// --- Run manifest ---
 
@@ -138,6 +144,8 @@ type CodeWikiRepository interface {
 	ListEvidenceByIDs(ctx context.Context, kbID string, ids []string) ([]*types.CodeWikiPageEvidence, error)
 	// DeleteEvidenceByRun removes a run's evidence (unpublished/canceled runs).
 	DeleteEvidenceByRun(ctx context.Context, runID string) error
+	// DeleteEvidenceByKB hard-deletes a KB's evidence rows (KB deletion).
+	DeleteEvidenceByKB(ctx context.Context, kbID string) error
 
 	// --- Batch publish ---
 
@@ -224,4 +232,18 @@ type CodeWikiService interface {
 	// enriches it with repository/snapshot display fields and the cited
 	// source excerpt read from the snapshot on disk.
 	GetEvidence(ctx context.Context, kbID, evidenceID string) (*types.CodeWikiPageEvidenceView, error)
+	// ListPageEvidence returns the citations bound to one published page
+	// version (the wiki browser's source sidebar).
+	ListPageEvidence(ctx context.Context, kbID, pageID string, version int) ([]*types.CodeWikiPageEvidenceView, error)
+
+	// --- Lifecycle ---
+
+	// CleanupKnowledgeBase removes ALL code wiki state for a deleted KB:
+	// cancels active runs (blocking later publish), soft-deletes bindings,
+	// snapshots, artifacts, runs and staged pages, hard-deletes evidence
+	// rows, and removes the KB's snapshot directory tree. Shared MCP
+	// services and externally owned indexes are never touched. Errors are
+	// best-effort and logged — KB deletion must not fail because a
+	// provider or the disk is unavailable.
+	CleanupKnowledgeBase(ctx context.Context, tenantID uint64, kbID string) error
 }

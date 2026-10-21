@@ -257,6 +257,12 @@ func (r *codeWikiRepository) DeleteSnapshot(ctx context.Context, kbID, id string
 		Delete(&types.CodeWikiSnapshot{}).Error
 }
 
+func (r *codeWikiRepository) DeleteSnapshotsByKB(ctx context.Context, kbID string) error {
+	return r.db.WithContext(ctx).
+		Where("knowledge_base_id = ?", kbID).
+		Delete(&types.CodeWikiSnapshot{}).Error
+}
+
 // --- Analysis artifacts -----------------------------------------------------
 
 func (r *codeWikiRepository) UpsertArtifact(ctx context.Context, artifact *types.CodeWikiAnalysisArtifact) error {
@@ -335,6 +341,12 @@ func (r *codeWikiRepository) ListArtifactsByIDs(ctx context.Context, kbID string
 func (r *codeWikiRepository) DeleteArtifactsByProfileVersion(ctx context.Context, repositoryID string, profileVersion int) error {
 	return r.db.WithContext(ctx).
 		Where("repository_id = ? AND profile_version = ?", repositoryID, profileVersion).
+		Delete(&types.CodeWikiAnalysisArtifact{}).Error
+}
+
+func (r *codeWikiRepository) DeleteArtifactsByKB(ctx context.Context, kbID string) error {
+	return r.db.WithContext(ctx).
+		Where("knowledge_base_id = ?", kbID).
 		Delete(&types.CodeWikiAnalysisArtifact{}).Error
 }
 
@@ -443,6 +455,27 @@ func (r *codeWikiRepository) TryAcquireRunLease(ctx context.Context, runID, owne
 	return res.RowsAffected > 0, nil
 }
 
+// DeleteRunsByKB soft-deletes a KB's runs. Non-terminal rows are first
+// flipped to canceled: the partial unique index (one active run per KB)
+// does not include deleted_at, so a soft-deleted "generating" row would
+// otherwise keep occupying the index slot.
+func (r *codeWikiRepository) DeleteRunsByKB(ctx context.Context, kbID string) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&types.CodeWikiRun{}).
+			Where("knowledge_base_id = ? AND status NOT IN ?", kbID, []string{
+				types.CodeWikiRunStatusPublished, types.CodeWikiRunStatusSuperseded,
+				types.CodeWikiRunStatusFailed, types.CodeWikiRunStatusCanceled,
+			}).
+			Updates(map[string]interface{}{
+				"status":     types.CodeWikiRunStatusCanceled,
+				"updated_at": time.Now().UTC(),
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Where("knowledge_base_id = ?", kbID).Delete(&types.CodeWikiRun{}).Error
+	})
+}
+
 // --- Run manifest -----------------------------------------------------------
 
 func (r *codeWikiRepository) ReplaceRunRepositories(ctx context.Context, runID string, entries []*types.CodeWikiRunRepository) error {
@@ -541,6 +574,11 @@ func (r *codeWikiRepository) ListEvidenceByIDs(ctx context.Context, kbID string,
 func (r *codeWikiRepository) DeleteEvidenceByRun(ctx context.Context, runID string) error {
 	return r.db.WithContext(ctx).
 		Where("run_id = ?", runID).Delete(&types.CodeWikiPageEvidence{}).Error
+}
+
+func (r *codeWikiRepository) DeleteEvidenceByKB(ctx context.Context, kbID string) error {
+	return r.db.WithContext(ctx).
+		Where("knowledge_base_id = ?", kbID).Delete(&types.CodeWikiPageEvidence{}).Error
 }
 
 // --- Batch publish ----------------------------------------------------------

@@ -49,6 +49,14 @@ type knowledgeBaseService struct {
 	dsScheduler     *datasource.Scheduler
 	audit           interfaces.AuditLogService
 	resourceCatalog interfaces.ResourceCatalog
+	// codeWikiService is late-wired from the container (avoids constructor
+	// churn); KB deletion calls it to clean code wiki state.
+	codeWikiService interfaces.CodeWikiService
+}
+
+// SetCodeWikiService wires the code wiki service for KB-deletion cleanup.
+func (s *knowledgeBaseService) SetCodeWikiService(svc interfaces.CodeWikiService) {
+	s.codeWikiService = svc
 }
 
 // NewKnowledgeBaseService creates a new knowledge base service
@@ -981,6 +989,15 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 	}
 
 	logger.Infof(ctx, "KB delete task completed successfully, knowledge base ID: %s", kbID)
+
+	// Code wiki state cleanup (plan §7: 撤销活动任务、阻止后续发布，异步清理
+	// 绑定、快照和本系统拥有的分析产物). Best-effort by contract — errors
+	// inside are logged, never propagated to fail the delete task.
+	if s.codeWikiService != nil {
+		if err := s.codeWikiService.CleanupKnowledgeBase(ctx, tenantID, kbID); err != nil {
+			logger.Warnf(ctx, "code wiki cleanup for KB %s reported: %v", kbID, err)
+		}
+	}
 	return nil
 }
 

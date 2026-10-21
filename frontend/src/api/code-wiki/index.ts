@@ -277,3 +277,10 @@ export function publishCodeWikiRun(kbId: string, runId: string, resolveConflicts
 export function getCodeWikiEvidence(kbId: string, evidenceId: string) {
   return get(`/api/v1/knowledgebase/${kbId}/code-wiki/evidence/${evidenceId}`);
 }
+
+// 页面版本级引用列表（Wiki 阅读界面的代码来源侧栏）。version 缺省时
+// 服务端解析为页面当前版本。
+export function listPageEvidence(kbId: string, pageId: string, version?: number) {
+  const qs = version ? `?version=${version}` : ''
+  return get(`/api/v1/knowledgebase/${kbId}/code-wiki/pages/${pageId}/evidence${qs}`)
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -280,28 +282,151 @@ func (s *codeWikiService) GetEvidence(ctx context.Context, kbID, evidenceID stri
 	if err != nil || len(rows) == 0 {
 		return nil, apperrors.NewNotFoundError("code wiki evidence not found")
 	}
-	row := rows[0]
-	view := &types.CodeWikiPageEvidenceView{CodeWikiPageEvidence: *row}
+	views, err := s.enrichEvidence(ctx, kb, rows)
+	if err != nil || len(views) == 0 {
+		return nil, apperrors.NewNotFoundError("code wiki evidence not found")
+	}
+	return views[0], nil
+}
 
-	if binding, bErr := s.repo.GetRepository(ctx, kbID, row.RepositoryID); bErr == nil && binding != nil {
-		view.RepositoryName = binding.DisplayName
-		view.RepositoryRole = binding.Role
-		if binding.WebURL != "" && row.Path != "" {
-			view.WebURL = fmt.Sprintf("%s/-/blob/%s/%s#L%d-L%d",
-				strings.TrimRight(binding.WebURL, "/"), row.CommitSHA, row.Path, row.StartLine, row.EndLine)
+// ListPageEvidence returns the citations bound to one published page
+// version — the wiki browser's source sidebar data. version <= 0 resolves
+// to the page's current version.
+func (s *codeWikiService) ListPageEvidence(ctx context.Context, kbID, pageID string, version int) ([]*types.CodeWikiPageEvidenceView, error) {
+	kb, err := s.requireCodeWikiKB(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	if version <= 0 {
+		page, pErr := s.wikiService.GetPageByID(ctx, pageID)
+		if pErr != nil || page == nil {
+			return nil, apperrors.NewNotFoundError("wiki page not found")
+		}
+		version = page.Version
+	}
+	rows, err := s.repo.ListEvidenceByPageVersion(ctx, kbID, pageID, version)
+	if err != nil {
+		return nil, err
+	}
+	return s.enrichEvidence(ctx, kb, rows)
+}
+
+// enrichEvidence decorates evidence rows with repository display fields,
+// the frozen-commit GitLab URL and the local excerpt.
+func (s *codeWikiService) enrichEvidence(ctx context.Context, kb *types.KnowledgeBase, rows []*types.CodeWikiPageEvidence) ([]*types.CodeWikiPageEvidenceView, error) {
+	views := make([]*types.CodeWikiPageEvidenceView, 0, len(rows))
+	bindingCache := make(map[string]*types.CodeWikiRepository)
+	snapshotCache := make(map[string]*types.CodeWikiSnapshot)
+	for _, row := range rows {
+		view := &types.CodeWikiPageEvidenceView{CodeWikiPageEvidence: *row}
+		binding, ok := bindingCache[row.RepositoryID]
+		if !ok {
+			if b, bErr := s.repo.GetRepository(ctx, kb.ID, row.RepositoryID); bErr == nil {
+				binding = b
+			}
+			bindingCache[row.RepositoryID] = binding
+		}
+		if binding != nil {
+			view.RepositoryName = binding.DisplayName
+			view.RepositoryRole = binding.Role
+			if binding.WebURL != "" && row.Path != "" {
+				view.WebURL = fmt.Sprintf("%s/-/blob/%s/%s#L%d-L%d",
+					strings.TrimRight(binding.WebURL, "/"), row.CommitSHA, row.Path, row.StartLine, row.EndLine)
+			}
+		}
+		snapshot, ok := snapshotCache[row.SnapshotID]
+		if !ok {
+			if snap, sErr := s.repo.GetSnapshot(ctx, kb.ID, row.SnapshotID); sErr == nil {
+				snapshot = snap
+			}
+			snapshotCache[row.SnapshotID] = snapshot
+		}
+		if snapshot != nil && snapshot.LocalPath != "" {
+			scope := codebase.SnapshotScope{
+				KnowledgeBaseID: kb.ID,
+				SnapshotID:      snapshot.ID,
+				RepositoryID:    row.RepositoryID,
+				CommitSHA:       row.CommitSHA,
+				LocalPath:       snapshot.LocalPath,
+			}
+			if excerpt, rErr := s.registry.Builtin().ReadSource(ctx, scope, row.Path, row.StartLine, row.EndLine); rErr == nil {
+				view.Lines = excerpt
+			}
+		}
+		views = append(views, view)
+	}
+	return views, nil
+}
+
+// CleanupKnowledgeBase removes all code wiki state after a KB delete:
+// active runs are canceled first (publish on a soft-deleted KB is also
+// blocked by the KB re-check), then bindings/snapshots/artifacts/runs and
+// staged pages are soft-deleted, evidence rows hard-deleted, and the KB's
+// snapshot directory tree removed. Shared MCP services and external
+// indexes are never touched (plan §7). All steps are best-effort: a
+// missing disk or provider outage must not fail the KB delete task.
+func (s *codeWikiService) CleanupKnowledgeBase(ctx context.Context, tenantID uint64, kbID string) error {
+	logger.Infof(ctx, "code wiki cleanup: knowledge base %s", kbID)
+
+	// Cancel any active run so a queued worker exits early and publish is
+	// refused (double fence with the KB re-check inside the worker).
+	if run, err := s.repo.ActiveRun(ctx, kbID); err == nil && run != nil {
+		now := time.Now().UTC()
+		run.Status = types.CodeWikiRunStatusCanceled
+		run.ErrorMessage = "knowledge base deleted"
+		run.CancelRequested = true
+		run.FinishedAt = &now
+		if err := s.repo.UpdateRun(ctx, run); err != nil {
+			logger.Warnf(ctx, "code wiki cleanup: cancel active run %s: %v", run.ID, err)
 		}
 	}
-	if snapshot, sErr := s.repo.GetSnapshot(ctx, kbID, row.SnapshotID); sErr == nil && snapshot != nil && snapshot.LocalPath != "" {
-		scope := codebase.SnapshotScope{
-			KnowledgeBaseID: kb.ID,
-			SnapshotID:      snapshot.ID,
-			RepositoryID:    row.RepositoryID,
-			CommitSHA:       row.CommitSHA,
-			LocalPath:       snapshot.LocalPath,
-		}
-		if excerpt, rErr := s.registry.Builtin().ReadSource(ctx, scope, row.Path, row.StartLine, row.EndLine); rErr == nil {
-			view.Lines = excerpt
+
+	// Soft-delete bindings (the unique index frees (kb, source, project,
+	// ref) immediately).
+	bindings, err := s.repo.ListRepositories(ctx, types.CodeWikiRepositoryFilter{KnowledgeBaseID: kbID})
+	if err != nil {
+		logger.Warnf(ctx, "code wiki cleanup: list bindings: %v", err)
+	}
+	for _, binding := range bindings {
+		if err := s.repo.DeleteRepository(ctx, kbID, binding.ID); err != nil {
+			logger.Warnf(ctx, "code wiki cleanup: delete binding %s: %v", binding.ID, err)
 		}
 	}
-	return view, nil
+
+	// Remove the snapshot directory tree BEFORE deleting the rows: rows go
+	// soft-deleted (historical references stay resolvable until their
+	// retention window), but the KB-scoped directory under the data root is
+	// exclusively ours and safe to drop now.
+	kbDir := filepath.Join(CodeWikiDataRoot(), fmt.Sprint(tenantID), kbID)
+	if err := os.RemoveAll(kbDir); err != nil {
+		logger.Warnf(ctx, "code wiki cleanup: remove snapshot dir %s: %v", kbDir, err)
+	}
+
+	// Hard-delete evidence rows: the pages they cite are going away with
+	// the KB, and their excerpts may hold the only copy of source content
+	// once the snapshots are gone.
+	if err := s.repo.DeleteEvidenceByKB(ctx, kbID); err != nil {
+		logger.Warnf(ctx, "code wiki cleanup: delete evidence: %v", err)
+	}
+
+	// Provider-owned analysis artifacts (builtin CLI index projects) live in
+	// the engine's own cache volume with server-generated project ids that
+	// never cross KB boundaries; the CleanupArtifact contract refuses
+	// unverifiable ownership, so nothing is deleted provider-side here.
+	// Revisit after the stage-0 CLI cleanup verification.
+
+	// Soft-delete snapshots and runs last (their rows keep historical
+	// references resolvable through the soft-delete window).
+	if err := s.repo.DeleteSnapshotsByKB(ctx, kbID); err != nil {
+		logger.Warnf(ctx, "code wiki cleanup: delete snapshots: %v", err)
+	}
+	if err := s.repo.DeleteRunsByKB(ctx, kbID); err != nil {
+		logger.Warnf(ctx, "code wiki cleanup: delete runs: %v", err)
+	}
+	if err := s.repo.DeleteArtifactsByKB(ctx, kbID); err != nil {
+		logger.Warnf(ctx, "code wiki cleanup: delete artifacts: %v", err)
+	}
+
+	logger.Infof(ctx, "code wiki cleanup: knowledge base %s done", kbID)
+	return nil
 }

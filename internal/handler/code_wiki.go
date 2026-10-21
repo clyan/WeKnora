@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -287,6 +288,29 @@ func (h *CodeWikiHandler) GetEvidence(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": view})
+}
+
+// ListPageEvidence handles
+// GET /knowledgebase/:kb_id/code-wiki/pages/:page_id/evidence?version=N —
+// the citations bound to one published page version (wiki browser source
+// sidebar). version defaults to the page's current version.
+func (h *CodeWikiHandler) ListPageEvidence(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	version := 0
+	if raw := c.Query("version"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			version = parsed
+		}
+	}
+	views, err := h.service.ListPageEvidence(c.Request.Context(), kbID, c.Param("page_id"), version)
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": views})
 }
 
 // respondCodeWikiError maps service errors to HTTP responses. Typed

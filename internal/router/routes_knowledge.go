@@ -292,6 +292,8 @@ func RegisterCodeWikiRoutes(r *gin.RouterGroup, codeWikiHandler *handler.CodeWik
 
 		// Evidence reading (cited source excerpt at a frozen commit).
 		cw.GET("/evidence/:id", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.GetEvidence)
+		// Page-version citations for the wiki browser's source sidebar.
+		cw.GET("/pages/:page_id/evidence", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListPageEvidence)
 	}
 }
 

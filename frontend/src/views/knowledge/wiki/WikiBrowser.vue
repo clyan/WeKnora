@@ -588,8 +588,8 @@
                 </t-alert>
               </div>
 
-              <!-- Page footer: backlinks + sources -->
-              <footer v-if="!editingPage && (selectedPage.in_links?.length || parsedSourceRefs.length)"
+              <!-- Page footer: backlinks + sources + code evidence -->
+              <footer v-if="!editingPage && (selectedPage.in_links?.length || parsedSourceRefs.length || pageEvidence.length)"
                 class="wiki-reader-footer">
                 <div v-if="selectedPage.in_links?.length" class="wiki-reader-footer-row">
                   <span class="wiki-reader-footer-label">{{ $t('knowledgeEditor.wikiBrowser.linkedFrom') }}</span>
@@ -607,6 +607,21 @@
                       @click.prevent="emit('open-source-doc', ref.id)">
                       {{ ref.title }}
                     </a>
+                  </span>
+                </div>
+                <div v-if="isCodeWikiPage && (pageEvidence.length || pageEvidenceLoading)"
+                  class="wiki-reader-footer-row">
+                  <span class="wiki-reader-footer-label">{{ $t('knowledgeEditor.wikiBrowser.codeSources') }}</span>
+                  <span class="wiki-reader-footer-value">
+                    <span v-if="pageEvidenceLoading" class="wiki-evidence-loading">
+                      {{ $t('knowledgeEditor.wikiBrowser.loading') }}
+                    </span>
+                    <template v-else>
+                      <a v-for="item in pageEvidence" :key="item.id" href="#" class="wiki-content-link"
+                        :title="item.symbol || item.path" @click.prevent="openEvidence(item.evidence_key)">
+                        {{ item.evidence_key }} {{ evidenceShortLabel(item) }}
+                      </a>
+                    </template>
                   </span>
                 </div>
               </footer>
@@ -725,6 +740,37 @@
         :kbIds="[props.knowledgeBaseId]" :embeddedMode="true" />
     </t-drawer>
 
+    <!-- Code wiki evidence drawer: one citation's file range at the frozen
+         commit, with the GitLab blob URL and the local snapshot excerpt. -->
+    <t-drawer v-model:visible="evidenceDrawerVisible" :header="activeEvidence?.evidence_key || ''"
+      size="560px" :footer="false" class="wiki-evidence-drawer">
+      <div v-if="activeEvidence" class="wiki-evidence-detail">
+        <div class="wiki-evidence-file">
+          <span v-if="activeEvidence.symbol" class="wiki-evidence-symbol">{{ activeEvidence.symbol }}</span>
+          <span class="wiki-evidence-path">{{ evidenceShortLabel(activeEvidence) }}</span>
+        </div>
+        <div class="wiki-evidence-meta">
+          <span v-if="activeEvidence.repository_name">
+            {{ $t('knowledgeEditor.wikiBrowser.evidenceRepo') }}: {{ activeEvidence.repository_name }}
+          </span>
+          <span v-if="activeEvidence.commit_sha">
+            {{ $t('knowledgeEditor.wikiBrowser.evidenceCommit') }}:
+            <code>{{ activeEvidence.commit_sha.slice(0, 12) }}</code>
+          </span>
+          <a v-if="activeEvidence.web_url" :href="activeEvidence.web_url" target="_blank"
+            rel="noopener noreferrer" class="wiki-evidence-gitlab">
+            {{ $t('knowledgeEditor.wikiBrowser.openInGitLab') }}
+          </a>
+        </div>
+        <template v-if="activeEvidence.lines">
+          <div class="wiki-evidence-excerpt-title">
+            {{ $t('knowledgeEditor.wikiBrowser.evidenceExcerpt') }}
+          </div>
+          <pre class="wiki-evidence-excerpt">{{ activeEvidence.lines }}</pre>
+        </template>
+      </div>
+    </t-drawer>
+
     <!-- Revision history drawer -->
     <WikiRevisionDrawer v-model:visible="showRevisionDrawer" :kb-id="props.knowledgeBaseId"
       :slug="selectedPage?.slug || ''" :current-page="selectedPage" :can-edit="props.canEdit"
@@ -809,6 +855,7 @@ import {
   expandWikiDirectoryPath,
 } from './wikiDirectoryState'
 import { getKnowledgeDetails } from '@/api/knowledge-base'
+import { listPageEvidence, type CodeWikiEvidenceView } from '@/api/code-wiki'
 import { createSessions } from '@/api/chat'
 import ChatView from '@/views/chat/index.vue'
 import {
@@ -1290,7 +1337,62 @@ watch(
   { immediate: true },
 )
 
-// Rendered content for graph drawer
+// Code wiki evidence: published code_wiki pages carry [E1]-style citations
+// bound server-side to snapshot file ranges. The rows are fetched per
+// page id+version so the reader footer can list them and citation clicks
+// (see renderMarkdown's citations pass) can open the detail drawer.
+const pageEvidence = ref<CodeWikiEvidenceView[]>([])
+const pageEvidenceLoading = ref(false)
+let pageEvidenceSeq = 0
+const evidenceDrawerVisible = ref(false)
+const activeEvidenceKey = ref('')
+const activeEvidence = computed(() =>
+  pageEvidence.value.find((item) => item.evidence_key === activeEvidenceKey.value) || null,
+)
+
+// Code wiki provenance marker written by the publish path (code_wiki_run_id
+// in page_metadata). Only those pages get evidence fetching and clickable
+// citations — [E1] in a human page stays plain text.
+const isCodeWikiPage = computed(() => !!selectedPage.value?.page_metadata?.code_wiki_run_id)
+
+watch(
+  () => [selectedPage.value?.id, selectedPage.value?.version] as const,
+  async ([pageId]) => {
+    const seq = ++pageEvidenceSeq
+    pageEvidence.value = []
+    evidenceDrawerVisible.value = false
+    activeEvidenceKey.value = ''
+    if (!pageId || !selectedPage.value?.page_metadata?.code_wiki_run_id) return
+    pageEvidenceLoading.value = true
+    try {
+      const res = await listPageEvidence(props.knowledgeBaseId, pageId)
+      if (seq !== pageEvidenceSeq) return
+      pageEvidence.value = ((res as any)?.data ?? res) as CodeWikiEvidenceView[]
+    } catch {
+      // Evidence is auxiliary — on failure the citations keep rendering as
+      // plain text and the footer section simply stays hidden.
+    } finally {
+      if (seq === pageEvidenceSeq) pageEvidenceLoading.value = false
+    }
+  },
+)
+
+function evidenceShortLabel(item: CodeWikiEvidenceView): string {
+  const where = item.start_line > 0
+    ? `${item.path}:${item.start_line}-${item.end_line || item.start_line}`
+    : item.path
+  return item.repository_name ? `${item.repository_name} · ${where}` : where
+}
+
+function openEvidence(key: string) {
+  if (!key) return
+  activeEvidenceKey.value = key
+  evidenceDrawerVisible.value = true
+}
+
+// Rendered content for graph drawer. Citations stay plain text here —
+// pageEvidence belongs to the open reader page, so a drawer page's [E1]
+// would resolve against the wrong rows; opening the page resolves them.
 const graphDrawerContent = computed(() => {
   if (!graphDrawerPage.value) return ''
   return renderMarkdown(graphDrawerPage.value.content)
@@ -1522,7 +1624,7 @@ watch(graphDrawerContent, async () => {
   }
 })
 
-function renderMarkdown(content: string): string {
+function renderMarkdown(content: string, opts?: { citations?: boolean }): string {
   // Pre-process wiki links [[slug|name]] to custom HTML tags
   let preprocessed = content.replace(/\[\[([^\]]+)\]\]/g, (_, inner: string) => {
     const pipeIdx = inner.indexOf('|')
@@ -1530,6 +1632,14 @@ function renderMarkdown(content: string): string {
     const display = pipeIdx > 0 ? inner.substring(pipeIdx + 1).trim() : slugDisplayName(slug)
     return `<a href="#" class="wiki-content-link" data-slug="${slug}">${display}</a>`
   })
+  // Code wiki citation labels [E1] → clickable anchors resolved against the
+  // page's evidence rows. The (?!\() guard leaves markdown links like
+  // [E1](https://…) untouched. Only enabled for code_wiki-published pages
+  // so human-written [E1] text never becomes a dead link.
+  if (opts?.citations) {
+    preprocessed = preprocessed.replace(/\[E(\d+)\](?!\()/g, (_, num: string) =>
+      `<a href="#" class="wiki-evidence-link" data-evidence="E${num}">[E${num}]</a>`)
+  }
 
   const html = marked.parse(preprocessed, { breaks: true, async: false }) as string
   return sanitizeMarkdownHTML(html)
@@ -1990,7 +2100,7 @@ function getPageIcon(page: WikiPage): string {
 const renderedContent = computed(() => {
   if (!selectedPage.value) return ''
   const body = stripDuplicateLeadingTitle(selectedPage.value.content || '', selectedPage.value.title)
-  return renderMarkdown(body)
+  return renderMarkdown(body, { citations: isCodeWikiPage.value })
 })
 
 function stripDuplicateLeadingTitle(content: string, title: string): string {
@@ -2062,6 +2172,9 @@ function handleContentClick(e: MouseEvent) {
     e.preventDefault()
     const slug = target.getAttribute('data-slug')
     if (slug) navigateToSlug(slug)
+  } else if (target.classList.contains('wiki-evidence-link')) {
+    e.preventDefault()
+    openEvidence(target.getAttribute('data-evidence') || '')
   } else if (target.tagName.toLowerCase() === 'img') {
     e.preventDefault()
     imagePreviewUrl.value = target.getAttribute('src') || ''
@@ -6013,6 +6126,99 @@ onUnmounted(() => {
     border-bottom-style: solid;
     text-decoration: none !important;
   }
+}
+
+.wiki-evidence-loading {
+  font-size: 12px;
+  color: var(--td-text-color-placeholder);
+}
+
+// Citation anchors inside rendered code-wiki page bodies (v-html → :deep).
+// Mirrors the wiki-content-link look; slightly muted since [E1] labels read
+// as punctuation, not navigation.
+.wiki-reader-body :deep(a.wiki-evidence-link) {
+  color: var(--td-brand-color);
+  opacity: 0.85;
+  text-decoration: none;
+  border-bottom: 1px dashed var(--td-brand-color);
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.92em;
+
+  &:hover {
+    opacity: 1;
+    border-bottom-style: solid;
+    text-decoration: none !important;
+  }
+}
+
+// ── Code wiki evidence drawer ──
+.wiki-evidence-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-size: 13px;
+}
+
+.wiki-evidence-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.wiki-evidence-symbol {
+  font-family: var(--td-font-family-code, monospace);
+  font-weight: 600;
+  color: var(--td-text-color-primary);
+}
+
+.wiki-evidence-path {
+  font-family: var(--td-font-family-code, monospace);
+  font-size: 12px;
+  color: var(--td-text-color-secondary);
+  word-break: break-all;
+}
+
+.wiki-evidence-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  color: var(--td-text-color-secondary);
+
+  code {
+    font-size: 12px;
+  }
+}
+
+.wiki-evidence-gitlab {
+  color: var(--td-brand-color);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--td-brand-color);
+
+  &:hover {
+    border-bottom-style: solid;
+  }
+}
+
+.wiki-evidence-excerpt-title {
+  font-size: 12px;
+  color: var(--td-text-color-placeholder);
+}
+
+.wiki-evidence-excerpt {
+  margin: 0;
+  padding: 12px;
+  max-height: 380px;
+  overflow: auto;
+  background: var(--td-bg-color-secondarycontainer);
+  border: 1px solid var(--td-component-stroke);
+  border-radius: var(--td-radius-medium, 6px);
+  font-family: var(--td-font-family-code, monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
 }
 
 // ── Empty states ──

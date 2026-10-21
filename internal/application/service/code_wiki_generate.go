@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1024,7 +1025,12 @@ func (s *codeWikiService) pageBaseline(ctx context.Context, kbID, slug string) (
 	return live.Version, live.LastEditSource
 }
 
-// callModel performs one bounded LLM call under the run's budget.
+// callModel performs one bounded LLM call under the run's budget. Rate
+// limits (429) are retried with jittered exponential backoff — provider
+// SDK errors surface as strings, so the status is detected textually and
+// Retry-After cannot be honored directly (plan §5.5 acknowledges serial
+// per-run calls do not eliminate account-level 429; this bounds the
+// damage instead of failing the run).
 func (s *codeWikiService) callModel(ctx context.Context, state *codeWikiRunState, prompt string) (string, error) {
 	if len(prompt) > codeWikiMaxContextChars*2 {
 		prompt = prompt[:codeWikiMaxContextChars*2]
@@ -1033,13 +1039,83 @@ func (s *codeWikiService) callModel(ctx context.Context, state *codeWikiRunState
 		{Role: "system", Content: "You are a precise technical documentation generator. Follow the evidence protocol strictly."},
 		{Role: "user", Content: prompt},
 	}
-	resp, err := state.chat.Chat(ctx, messages, &chat.ChatOptions{Temperature: 0.2})
-	if err != nil {
-		return "", err
+	var lastErr error
+	for attempt := 0; attempt <= codeWikiMaxRateLimitRetries; attempt++ {
+		if codeWikiSleepRespectingCancel(ctx, codeWikiRateLimitDelay(attempt)) {
+			return "", context.Canceled
+		}
+		resp, err := state.chat.Chat(ctx, messages, &chat.ChatOptions{Temperature: 0.2})
+		if err == nil {
+			state.run.ModelCalls++
+			state.run.TokensUsed += int64(resp.Usage.TotalTokens)
+			return resp.Content, nil
+		}
+		lastErr = err
+		if !isCodeWikiRateLimitError(err) || ctx.Err() != nil {
+			return "", err
+		}
+		logger.Warnf(ctx, "code wiki generate: model rate limited (attempt %d/%d): %v",
+			attempt+1, codeWikiMaxRateLimitRetries+1, err)
+		// Surface the wait in the run phase so the UI shows "waiting for
+		// quota" instead of a stuck spinner.
+		phase := state.run.Phase
+		state.run.Phase = "等待模型额度（429 退避中）"
+		_ = s.repo.UpdateRun(ctx, state.run)
+		state.run.Phase = phase
 	}
-	state.run.ModelCalls++
-	state.run.TokensUsed += int64(resp.Usage.TotalTokens)
-	return resp.Content, nil
+	return "", lastErr
+}
+
+const (
+	// codeWikiMaxRateLimitRetries bounds 429 retries per model call.
+	codeWikiMaxRateLimitRetries = 3
+	// codeWikiRateLimitBaseDelay is the first backoff step.
+	codeWikiRateLimitBaseDelay = 5 * time.Second
+)
+
+// codeWikiRateLimitDelay returns the backoff for one attempt with ±30%
+// jitter (attempt 0 waits before the first call only when a prior loop
+// iteration flagged a rate limit — the sleep is skipped via zero delay).
+func codeWikiRateLimitDelay(attempt int) time.Duration {
+	if attempt == 0 {
+		return 0
+	}
+	base := codeWikiRateLimitBaseDelay * (1 << (attempt - 1)) // 5s, 10s, 20s
+	if base > 2*time.Minute {
+		base = 2 * time.Minute
+	}
+	jitter := base / 3
+	return base - jitter + time.Duration(rand.Int63n(int64(2*jitter)+1))
+}
+
+// codeWikiSleepRespectingCancel sleeps for d, returning true when the
+// context was cancelled first.
+func codeWikiSleepRespectingCancel(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return false
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// isCodeWikiRateLimitError recognizes provider rate-limit failures from
+// their stringified errors (status code, marker words).
+func isCodeWikiRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "429") || strings.Contains(msg, "too many requests") {
+		return true
+	}
+	return strings.Contains(msg, "rate limit") || strings.Contains(msg, "rate_limit") ||
+		strings.Contains(msg, "quota exceeded")
 }
 
 // --- helpers ----------------------------------------------------------------

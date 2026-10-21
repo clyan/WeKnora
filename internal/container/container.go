@@ -365,10 +365,18 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewDataSourceService))
 	must(container.Invoke(startDataSourceScheduler))
 	// Late wiring: route datasource:sync tasks for code_wiki KBs to the code
-	// wiki service (avoids constructor-parameter churn on DataSourceService).
-	must(container.Invoke(func(dsService interfaces.DataSourceService, codeWiki interfaces.CodeWikiService) {
+	// wiki service, and hook KB-deletion cleanup (avoids constructor churn).
+	// The KB service's implementation type is unexported, so the hook is
+	// asserted through a small local interface.
+	must(container.Invoke(func(dsService interfaces.DataSourceService, kbService interfaces.KnowledgeBaseService, codeWiki interfaces.CodeWikiService) {
 		if impl, ok := dsService.(*service.DataSourceService); ok {
 			impl.SetCodeWikiService(codeWiki)
+		}
+		type codeWikiHook interface {
+			SetCodeWikiService(interfaces.CodeWikiService)
+		}
+		if hook, ok := kbService.(codeWikiHook); ok {
+			hook.SetCodeWikiService(codeWiki)
 		}
 	}))
 	logger.Debugf(ctx, "[Container] Data source sync framework registered")
