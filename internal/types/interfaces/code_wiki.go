@@ -44,6 +44,9 @@ type CodeWikiRepository interface {
 	// UpdateRepositoryStatus persists the sync summary fields (status,
 	// last snapshot/commit, error message) without touching filters.
 	UpdateRepositoryStatus(ctx context.Context, repo *types.CodeWikiRepository) error
+	// TryMarkSyncing transitions a binding into syncing only when it is not
+	// already syncing (compare-and-swap against concurrent submissions).
+	TryMarkSyncing(ctx context.Context, id string) (bool, error)
 
 	// --- Snapshots ---
 

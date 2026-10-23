@@ -32,7 +32,7 @@ import (
 const (
 	// codeWikiDefaultDataRoot is the persistent volume suggested by the plan
 	// (docker-compose mounts /data/code-wiki). Local dev without /data uses
-	// ./.local-data/code-wiki.
+	// <working-dir>/.local-data/code-wiki (created on demand).
 	codeWikiDefaultDataRoot  = "/data/code-wiki"
 	codeWikiDevDataRootSuffix = ".local-data/code-wiki"
 
@@ -46,10 +46,12 @@ const (
 )
 
 // CodeWikiDataRoot resolves the snapshot storage root: env override → /data
-// when writable → local dev directory.
+// when writable → local dev directory. The dev fallback is anchored to the
+// process working directory so it never depends on where the worker was
+// launched from.
 func CodeWikiDataRoot() string {
 	if root := strings.TrimSpace(os.Getenv("WEKNORA_CODE_WIKI_DATA_DIR")); root != "" {
-		return root
+		return filepath.Clean(root)
 	}
 	if info, err := os.Stat("/data"); err == nil && info.IsDir() {
 		if probe, err := os.CreateTemp("/data", ".cw-probe-*"); err == nil {
@@ -58,7 +60,20 @@ func CodeWikiDataRoot() string {
 			return codeWikiDefaultDataRoot
 		}
 	}
+	if wd, err := os.Getwd(); err == nil {
+		return filepath.Join(wd, codeWikiDevDataRootSuffix)
+	}
 	return codeWikiDevDataRootSuffix
+}
+
+// ensureCodeWikiRoot returns the snapshot root with the directory actually
+// present — MkdirTemp fails if the parent does not exist yet (local dev boot).
+func ensureCodeWikiRoot() (string, error) {
+	root := CodeWikiDataRoot()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", fmt.Errorf("ensure snapshot root %s: %w", root, err)
+	}
+	return root, nil
 }
 
 func codeWikiMaxArchiveBytes() int64 {
@@ -204,21 +219,29 @@ func (s *codeWikiService) SyncRepositories(ctx context.Context, kbID string, ids
 	for _, id := range ids {
 		selected[id] = struct{}{}
 	}
-	// Mark selected bindings syncing so the UI reflects in-flight state.
+	// Mark selected bindings syncing so the UI reflects in-flight state. The
+	// compare-and-swap refuses bindings already syncing, so repeated clicks
+	// (or a data-source sync racing a manual one) never double-enqueue work.
 	targets := make([]string, 0, len(bindings))
+	marked := make([]*types.CodeWikiRepository, 0, len(bindings))
 	for _, b := range bindings {
 		if len(selected) > 0 {
 			if _, ok := selected[b.ID]; !ok {
 				continue
 			}
 		}
+		won, err := s.repo.TryMarkSyncing(ctx, b.ID)
+		if err != nil {
+			return 0, err
+		}
+		if !won {
+			continue
+		}
+		marked = append(marked, b)
 		targets = append(targets, b.ID)
-		b.Status = types.CodeWikiRepoStatusSyncing
-		b.ErrorMessage = ""
-		_ = s.repo.UpdateRepositoryStatus(ctx, b)
 	}
 	if len(targets) == 0 {
-		return 0, apperrors.NewBadRequestError("no matching repositories to sync")
+		return 0, apperrors.NewBadRequestError("repository is already syncing")
 	}
 	payload := &types.CodeWikiSyncPayload{
 		TenantID:        kb.TenantID,
@@ -228,12 +251,10 @@ func (s *codeWikiService) SyncRepositories(ctx context.Context, kbID string, ids
 	}
 	if err := s.enqueueCodeWikiTask(ctx, types.TypeCodeWikiSync, payload, 30*time.Minute); err != nil {
 		// Restore statuses so the UI doesn't show a stuck "syncing".
-		for _, b := range bindings {
-			if b.Status == types.CodeWikiRepoStatusSyncing {
-				b.Status = types.CodeWikiRepoStatusError
-				b.ErrorMessage = "failed to enqueue sync task"
-				_ = s.repo.UpdateRepositoryStatus(ctx, b)
-			}
+		for _, b := range marked {
+			b.Status = types.CodeWikiRepoStatusError
+			b.ErrorMessage = "failed to enqueue sync task"
+			_ = s.repo.UpdateRepositoryStatus(ctx, b)
 		}
 		return 0, err
 	}
@@ -288,12 +309,34 @@ func (s *codeWikiService) RouteDataSourceSync(ctx context.Context, ds *types.Dat
 		}
 		return nil
 	}
+	// Compare-and-swap into syncing: bindings already syncing via another
+	// submission (manual click racing this data-source sync) are skipped.
 	ids := make([]string, 0, len(bindings))
+	marked := make([]*types.CodeWikiRepository, 0, len(bindings))
 	for _, b := range bindings {
+		won, err := s.repo.TryMarkSyncing(ctx, b.ID)
+		if err != nil {
+			return err
+		}
+		if !won {
+			continue
+		}
+		marked = append(marked, b)
 		ids = append(ids, b.ID)
-		b.Status = types.CodeWikiRepoStatusSyncing
-		b.ErrorMessage = ""
-		_ = s.repo.UpdateRepositoryStatus(ctx, b)
+	}
+	if len(ids) == 0 {
+		// Everything is already syncing: close the sync log instead of
+		// leaving it "running" forever.
+		if syncLogID != "" {
+			if log, lErr := s.syncLogRepo.FindByID(ctx, syncLogID); lErr == nil && log != nil {
+				now := time.Now()
+				log.Status = types.SyncLogStatusSuccess
+				log.FinishedAt = &now
+				log.ErrorMessage = "repositories are already syncing"
+				_ = s.syncLogRepo.Update(ctx, log)
+			}
+		}
+		return nil
 	}
 	payload := &types.CodeWikiSyncPayload{
 		TenantID:        ds.TenantID,
@@ -302,7 +345,15 @@ func (s *codeWikiService) RouteDataSourceSync(ctx context.Context, ds *types.Dat
 		SyncLogID:       syncLogID,
 		Initiator:       types.TaskInitiatorFromContext(ctx),
 	}
-	return s.enqueueCodeWikiTask(ctx, types.TypeCodeWikiSync, payload, 30*time.Minute)
+	if err := s.enqueueCodeWikiTask(ctx, types.TypeCodeWikiSync, payload, 30*time.Minute); err != nil {
+		for _, b := range marked {
+			b.Status = types.CodeWikiRepoStatusError
+			b.ErrorMessage = "failed to enqueue sync task"
+			_ = s.repo.UpdateRepositoryStatus(ctx, b)
+		}
+		return err
+	}
+	return nil
 }
 
 // finalizeCodeWikiSyncLog closes the linked data source sync log based on
@@ -562,7 +613,10 @@ func (s *codeWikiService) downloadSnapshot(
 	// Bound compressed bytes regardless of any server-reported length.
 	limited := io.LimitReader(body, codeWikiMaxArchiveBytes()+1)
 
-	root := CodeWikiDataRoot()
+	root, err := ensureCodeWikiRoot()
+	if err != nil {
+		return nil, err
+	}
 	staging, err := os.MkdirTemp(root, ".staging-")
 	if err != nil {
 		return nil, fmt.Errorf("create staging dir under %s: %w", root, err)

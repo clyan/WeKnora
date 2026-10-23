@@ -65,7 +65,7 @@
           <p class="cw-section-desc">{{ $t('codeWiki.repositories.description') }}</p>
         </div>
         <div class="cw-section-actions">
-          <t-button variant="outline" size="small" :disabled="!canEdit || !repositories.length"
+          <t-button variant="outline" size="small" :disabled="!canEdit || !repositories.length || anySyncing"
             @click="syncAllRepositories">
             {{ $t('codeWiki.repositories.syncAll') }}
           </t-button>
@@ -96,7 +96,7 @@
           <span v-else class="repo-error-empty">—</span>
         </template>
         <template #actions="{ row }">
-          <t-button variant="text" size="small" theme="primary" :disabled="!canEdit"
+          <t-button variant="text" size="small" theme="primary" :disabled="!canEdit || row.status === 'syncing'"
             @click="syncRepositories([row.id])">{{ $t('codeWiki.repositories.sync') }}</t-button>
           <t-popconfirm :content="$t('codeWiki.repositories.deleteConfirm')" @confirm="removeRepository(row)">
             <t-button variant="text" size="small" theme="danger" :disabled="!canEdit">
@@ -228,6 +228,9 @@ const activeRun = computed<CodeWikiRun | null>(() => {
   return runs.value.find((run) => !terminal.includes(run.status)) ?? null
 })
 const readyRepositoryCount = computed(() => repositories.value.filter((r) => r.status === 'ready').length)
+// A syncing repository disables the sync buttons; the backend also refuses
+// double submissions, this keeps the UI from even offering them.
+const anySyncing = computed(() => repositories.value.some((r) => r.status === 'syncing'))
 const stagedConflictCount = computed(() => {
   // Conflict detail lives on the run detail pages payload; surfaced during
   // publish errors. Kept as a reactive ref updated by publish failures.

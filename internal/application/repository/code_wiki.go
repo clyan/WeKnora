@@ -181,6 +181,23 @@ func (r *codeWikiRepository) UpdateRepositoryStatus(ctx context.Context, repo *t
 		}).Error
 }
 
+// TryMarkSyncing flips a binding into syncing only when another submission
+// hasn't already claimed it; false means a sync is already in flight.
+func (r *codeWikiRepository) TryMarkSyncing(ctx context.Context, id string) (bool, error) {
+	res := r.db.WithContext(ctx).
+		Model(&types.CodeWikiRepository{}).
+		Where("id = ? AND status <> ?", id, types.CodeWikiRepoStatusSyncing).
+		Updates(map[string]interface{}{
+			"status":        types.CodeWikiRepoStatusSyncing,
+			"error_message": "",
+			"updated_at":    time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
 // --- Snapshots --------------------------------------------------------------
 
 func (r *codeWikiRepository) CreateSnapshot(ctx context.Context, snap *types.CodeWikiSnapshot) error {
