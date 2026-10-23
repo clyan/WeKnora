@@ -38,6 +38,8 @@ const CodeWikiOutlinePrompt = `You are planning the documentation outline for a 
 
 Rules:
 - Start from the default outline and adjust chapters/emphasis to the custom instructions and what the repositories actually contain.
+- Cross-repository analysis includes frontend applications and shared npm/workspace packages. Plan package dependencies, imports, exports and integration chapters when such repositories are supplied; backend code is not a prerequisite. Do not add frontend/backend chapters when no backend repository is available.
+- Focus on supplied BUSINESS packages and their real usage: business-page entry points, components, state, API requests, and integration with internal packages. package.json is a locator for this investigation, not a list of topics. Do not create chapters for generic third-party packages, devDependencies, lint/build/test tools, or unrelated packages just because they appear in a manifest.
 - You may add, merge or drop chapters, but never invent facts: planning only decides WHAT to document, later stages must find evidence.
 - Produce at most {{.MaxPages}} pages. Keep one page per topic; per-repository pages only for repositories with substantive content.
 - For each page choose: category (overview|architecture|interaction|workflow|repository|devops|analysis), a short slug, a title, and a one-line scope description.
@@ -81,6 +83,8 @@ Rules:
 - Write in {{.Language}}. Markdown, well-structured, directly useful to a new engineer or operator.
 - Cite evidence inline as [E1], [E2]… immediately after the claim it supports. You may ONLY cite IDs from <evidence>.
 - NEVER state a call/flow/dependency relationship without evidence covering BOTH sides. If only one side exists, describe what is shown and mark the rest as unverified ("未确认" or equivalent).
+- A package.json dependency plus the target package's name establishes a declared package dependency. An import establishes package use, not a resolved function call. A provided package snapshot does not prove that its version is the one installed by the consumer; disclose version differences.
+- Explain business behavior and the supplied business packages' collaboration. Use dependency metadata only to find supporting source; avoid cataloguing third-party dependencies and development tools.
 - If evidence for the page's scope is thin, say so explicitly and lower the strength of conclusions; list what could not be confirmed.
 - Do not fabricate file names, line numbers, routes, config keys or commands that are not in the evidence.
 - Link related pages with [[slug]] using only slugs listed in <project_context>.

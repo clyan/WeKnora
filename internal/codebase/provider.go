@@ -122,15 +122,20 @@ type SymbolHit struct {
 // generation pipeline must confirm them against source before describing
 // them as established behavior.
 type RelationEdge struct {
-	Kind       string `json:"kind"` // call | http_call | grpc_call | import | …
-	FromSymbol string `json:"from_symbol,omitempty"`
-	FromPath   string `json:"from_path,omitempty"`
-	ToSymbol   string `json:"to_symbol,omitempty"`
-	ToPath     string `json:"to_path,omitempty"`
+	FromRepositoryID string `json:"from_repository_id,omitempty"`
+	ToRepositoryID   string `json:"to_repository_id,omitempty"`
+	Kind             string `json:"kind"` // call | http_call | grpc_call | import | …
+	FromSymbol       string `json:"from_symbol,omitempty"`
+	FromPath         string `json:"from_path,omitempty"`
+	ToSymbol         string `json:"to_symbol,omitempty"`
+	ToPath           string `json:"to_path,omitempty"`
 	// ExternalTarget carries an out-of-repository target (URL, route,
 	// service name) for cross-repository association candidates.
 	ExternalTarget string `json:"external_target,omitempty"`
 	StartLine      int    `json:"start_line,omitempty"`
+	EndLine        int    `json:"end_line,omitempty"`
+	ToStartLine    int    `json:"to_start_line,omitempty"`
+	ToEndLine      int    `json:"to_end_line,omitempty"`
 }
 
 // DirectoryEntry is one node of a repository's (filtered) file tree.

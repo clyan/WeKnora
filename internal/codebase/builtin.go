@@ -52,7 +52,7 @@ func (p *BuiltinProvider) CheckCapabilities(ctx context.Context, _ *types.CodeWi
 		})
 	}
 	versionNote := "engine " + version
-	if !strings.HasPrefix(strings.TrimSpace(version), strings.TrimSpace(BuiltinSupportedVersion)) {
+	if version != BuiltinSupportedVersion {
 		report.Notes = append(report.Notes,
 			fmt.Sprintf("codebase-memory-mcp %s has not been validated for this integration (supported: %s); verify before relying on it", version, BuiltinSupportedVersion))
 	}
@@ -65,10 +65,9 @@ func (p *BuiltinProvider) CheckCapabilities(ctx context.Context, _ *types.CodeWi
 	set(types.CodeWikiCapDirectory, true, "local", "", "filtered tree on disk")
 	set(types.CodeWikiCapSymbols, true, "provider", "search_code", "symbol-aware search")
 	set(types.CodeWikiCapCallGraph, true, "provider", "query_graph", "graph relations are candidates pending source verification")
-	set(types.CodeWikiCapCrossRepo, false, "", "", "per-repository indexes; cross-repository association joined by WeKnora")
+	set(types.CodeWikiCapCrossRepo, version == BuiltinSupportedVersion, "builtin", "index_repository",
+		"native cross-repo service linking; npm package dependencies and imports verified against both frozen snapshots")
 	set(types.CodeWikiCapCoverage, true, "provider", "index_status", versionNote)
-	report.Notes = append(report.Notes,
-		"no native cross-repository index: associations are formed by per-repository retrieval plus source verification")
 	report.MeetsMinimum = true
 	return report, nil
 }
@@ -86,7 +85,7 @@ func (p *BuiltinProvider) PrepareArtifact(ctx context.Context, scope SnapshotSco
 
 	// Verify an existing index first: same project name is only reused when
 	// the engine still reports it indexed.
-	if status, err := p.exec.cliIndexStatus(ctx, project); err == nil && status.Indexed {
+	if status, err := p.exec.cliIndexStatus(ctx, project); err == nil && (status.Indexed || status.Status == "ready") {
 		version, vErr := p.exec.cliVersion(ctx)
 		if vErr != nil {
 			version = ""
@@ -193,11 +192,10 @@ func (p *BuiltinProvider) QueryRelations(ctx context.Context, scope SnapshotScop
 	return nil, ErrUnsupported
 }
 
-// QueryCrossRepository: the builtin engine indexes per repository, so
-// cross-repository association is performed by WeKnora (per-repository
-// retrieval + source verification), never faked as native graph edges.
+// QueryCrossRepository links only the supplied frozen projects, then resolves
+// npm dependencies across their package manifests and indexed import sites.
 func (p *BuiltinProvider) QueryCrossRepository(ctx context.Context, scopes []SnapshotScope, query string, opts QueryOptions) ([]RelationEdge, error) {
-	return nil, ErrUnsupported
+	return p.queryCrossRepository(ctx, scopes, opts)
 }
 
 // ReportCoverage summarizes index state for one artifact.

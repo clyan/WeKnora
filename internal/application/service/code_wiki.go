@@ -87,7 +87,16 @@ func (s *codeWikiService) GetAnalysisProfile(ctx context.Context, kbID string) (
 	if _, err := s.requireCodeWikiKB(ctx, kbID); err != nil {
 		return nil, err
 	}
-	return s.repo.GetAnalysisProfile(ctx, codeWikiTenantID(ctx), kbID)
+	profile, err := s.repo.GetAnalysisProfile(ctx, codeWikiTenantID(ctx), kbID)
+	if err != nil {
+		return nil, err
+	}
+	// Refresh the builtin report after a local executable upgrade. Historical
+	// runs keep their frozen report; the current configuration reflects reality.
+	if profile.ProviderKind == "" || profile.ProviderKind == types.CodeWikiProviderBuiltin {
+		return s.TestAnalysisProfile(ctx, kbID)
+	}
+	return profile, nil
 }
 
 // UpdateAnalysisProfile validates and saves the provider configuration.

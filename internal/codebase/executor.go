@@ -156,7 +156,9 @@ func (e *builtinExecutor) cliVersion(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(stdout)), nil
+	version := strings.TrimSpace(string(stdout))
+	version = strings.TrimPrefix(version, "codebase-memory-mcp ")
+	return strings.TrimPrefix(version, "v"), nil
 }
 
 // cliListProjects returns the projects known to the engine.
@@ -186,7 +188,7 @@ func (e *builtinExecutor) cliIndexRepository(ctx context.Context, repoPath, proj
 // cliIndexStatus returns the index state of one project.
 func (e *builtinExecutor) cliIndexStatus(ctx context.Context, project string) (*builtinIndexStatus, error) {
 	var out builtinIndexStatus
-	if err := e.runJSON(ctx, builtinRunTimeout, &out, "cli", "index_status", "--project", project); err != nil {
+	if err := e.runJSON(ctx, builtinRunTimeout, &out, "cli", "index_status", "--project", project, "--format", "json"); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -199,28 +201,109 @@ type builtinIndexStatus struct {
 	Nodes     int    `json:"nodes,omitempty"`
 	Edges     int    `json:"edges,omitempty"`
 	IndexedAt string `json:"indexed_at,omitempty"`
+	Status    string `json:"status"`
 }
 
 // cliSearchCode runs a scoped code search.
 func (e *builtinExecutor) cliSearchCode(ctx context.Context, project, query string, limit int) ([]SearchHit, error) {
 	var out struct {
-		Results []struct {
-			Path      string `json:"path"`
-			StartLine int    `json:"start_line"`
-			EndLine   int    `json:"end_line"`
-			Symbol    string `json:"symbol"`
-			Snippet   string `json:"snippet"`
-		} `json:"results"`
+		Cols       []string            `json:"cols"`
+		Rows       [][]json.RawMessage `json:"rows"`
+		RawMatches struct {
+			Cols []string            `json:"cols"`
+			Rows [][]json.RawMessage `json:"rows"`
+		} `json:"raw_matches"`
 	}
-	args := []string{"cli", "search_code", "--project", project, "--query", query, "--limit", fmt.Sprint(limit)}
+	args := []string{"cli", "search_code", "--project", project, "--pattern", query, "--limit", fmt.Sprint(limit), "--format", "json"}
 	if err := e.runJSON(ctx, builtinRunTimeout, &out, args...); err != nil {
 		return nil, err
 	}
-	hits := make([]SearchHit, 0, len(out.Results))
-	for _, r := range out.Results {
-		hits = append(hits, SearchHit{Path: r.Path, StartLine: r.StartLine, EndLine: r.EndLine, Symbol: r.Symbol, Snippet: r.Snippet})
+	if len(out.Cols) == 0 {
+		return nil, fmt.Errorf("codebase: search_code returned no column schema")
+	}
+	var hits []SearchHit
+	for _, row := range out.Rows {
+		cells := tableRow(out.Cols, row)
+		var hit SearchHit
+		_ = json.Unmarshal(cells["file"], &hit.Path)
+		_ = json.Unmarshal(cells["qn"], &hit.Symbol)
+		var lines string
+		_ = json.Unmarshal(cells["lines"], &lines)
+		_, _ = fmt.Sscanf(lines, "%d-%d", &hit.StartLine, &hit.EndLine)
+		if hit.EndLine < hit.StartLine {
+			hit.EndLine = hit.StartLine
+		}
+		if hit.Path != "" {
+			hits = append(hits, hit)
+		}
+	}
+	for _, row := range out.RawMatches.Rows {
+		if len(hits) >= limit {
+			break
+		}
+		cells := tableRow(out.RawMatches.Cols, row)
+		var hit SearchHit
+		_ = json.Unmarshal(cells["file"], &hit.Path)
+		_ = json.Unmarshal(cells["line"], &hit.StartLine)
+		_ = json.Unmarshal(cells["content"], &hit.Snippet)
+		hit.EndLine = hit.StartLine
+		if hit.Path != "" {
+			hits = append(hits, hit)
+		}
 	}
 	return hits, nil
+}
+
+func tableRow(columns []string, row []json.RawMessage) map[string]json.RawMessage {
+	cells := make(map[string]json.RawMessage, len(columns))
+	for i, name := range columns {
+		if i < len(row) {
+			cells[name] = row[i]
+		}
+	}
+	return cells
+}
+
+// cliLinkRepositories limits native linking to the caller's frozen snapshot set.
+// Never use target_projects=["*"]: the engine store can contain other tenants.
+func (e *builtinExecutor) cliLinkRepositories(ctx context.Context, scope SnapshotScope, targets []string) error {
+	args, err := json.Marshal(map[string]any{
+		"repo_path": scope.LocalPath, "name": scope.ArtifactHandle,
+		"mode": "cross-repo-intelligence", "target_projects": targets,
+	})
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := e.runJSON(ctx, builtinRunTimeout, &result, "cli", "index_repository", string(args)); err != nil {
+		return err
+	}
+	if result.Status != "success" {
+		return fmt.Errorf("native cross-repository linking: %s: %s", result.Status, result.Error)
+	}
+	return nil
+}
+
+func (e *builtinExecutor) cliCrossRelations(ctx context.Context, project string, limit int) ([]map[string]json.RawMessage, error) {
+	query := fmt.Sprintf("MATCH (a)-[r:CROSS_HTTP_CALLS|CROSS_GRPC_CALLS|CROSS_GRAPHQL_CALLS|CROSS_TRPC_CALLS|CROSS_ASYNC_CALLS|CROSS_CHANNEL]->(b) RETURN type(r) AS kind, a.qualified_name AS from_symbol, a.file_path AS from_path, a.start_line AS from_line, b.qualified_name AS to_symbol, b.file_path AS to_path, b.start_line AS to_line LIMIT %d", limit)
+	var out struct {
+		Columns []string            `json:"columns"`
+		Rows    [][]json.RawMessage `json:"rows"`
+	}
+	if err := e.runJSON(ctx, builtinRunTimeout, &out, "cli", "query_graph", "--project", project, "--query", query, "--format", "json"); err != nil {
+		return nil, err
+	}
+	if len(out.Columns) == 0 {
+		return nil, fmt.Errorf("codebase: cross-repository graph returned no column schema")
+	}
+	var rows []map[string]json.RawMessage
+	for _, row := range out.Rows {
+		rows = append(rows, tableRow(out.Columns, row))
+	}
+	return rows, nil
 }
 
 // cliGetCodeSnippet returns a source excerpt.

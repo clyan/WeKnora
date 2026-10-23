@@ -38,23 +38,23 @@ import (
 // creation and is the ONLY source of generation inputs for the worker — a
 // later config edit cannot change what an in-flight run produces.
 type codeWikiRunConfig struct {
-	Languages            []string                     `json:"languages,omitempty"`
-	ContentInstructions  string                       `json:"content_instructions,omitempty"`
-	ExtractionInstructions string                     `json:"extraction_instructions,omitempty"`
-	MaxPages             int                          `json:"max_pages"`
-	MaxModelCalls        int                          `json:"max_model_calls"`
-	TimeoutMinutes       int                          `json:"timeout_minutes"`
-	Provider             codeWikiFrozenProvider       `json:"provider"`
+	Languages              []string               `json:"languages,omitempty"`
+	ContentInstructions    string                 `json:"content_instructions,omitempty"`
+	ExtractionInstructions string                 `json:"extraction_instructions,omitempty"`
+	MaxPages               int                    `json:"max_pages"`
+	MaxModelCalls          int                    `json:"max_model_calls"`
+	TimeoutMinutes         int                    `json:"timeout_minutes"`
+	Provider               codeWikiFrozenProvider `json:"provider"`
 }
 
 // codeWikiFrozenProvider pins the analysis profile fields a run executes
 // with (plan §4.4: 活动批次固定旧配置版本，不在中途切换工具或服务地址).
 type codeWikiFrozenProvider struct {
-	Kind             string                         `json:"kind"`
-	MCPServiceID     string                         `json:"mcp_service_id,omitempty"`
-	ToolMappings     []types.CodeWikiToolMapping    `json:"tool_mappings,omitempty"`
-	SnapshotDelivery string                         `json:"snapshot_delivery"`
-	SharedRoot       string                         `json:"shared_root,omitempty"`
+	Kind             string                      `json:"kind"`
+	MCPServiceID     string                      `json:"mcp_service_id,omitempty"`
+	ToolMappings     []types.CodeWikiToolMapping `json:"tool_mappings,omitempty"`
+	SnapshotDelivery string                      `json:"snapshot_delivery"`
+	SharedRoot       string                      `json:"shared_root,omitempty"`
 }
 
 type codeWikiPlannedPage struct {
@@ -94,7 +94,7 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 	} else if active != nil {
 		return nil, apperrors.NewBadRequestError("another generation run is already active for this knowledge base")
 	}
-	profile, err := s.repo.GetAnalysisProfile(ctx, kb.TenantID, kbID)
+	profile, err := s.GetAnalysisProfile(ctx, kbID)
 	if err != nil {
 		return nil, err
 	}
@@ -315,17 +315,17 @@ func (s *codeWikiService) CancelRun(ctx context.Context, kbID, runID string) err
 func (s *codeWikiService) persistPlannedPages(ctx context.Context, run *types.CodeWikiRun, pages []codeWikiPlannedPage) {
 	for _, page := range pages {
 		row := &types.CodeWikiRunPage{
-			ID:              uuid.NewString(),
-			TenantID:        run.TenantID,
-			KnowledgeBaseID: run.KnowledgeBaseID,
-			RunID:           run.ID,
-			PageKey:         page.Slug,
-			Title:           page.Title,
-			PageType:        types.WikiPageTypeSynthesis,
-			Category:        page.Category,
-			Status:          types.CodeWikiRunPageStatusPending,
+			ID:               uuid.NewString(),
+			TenantID:         run.TenantID,
+			KnowledgeBaseID:  run.KnowledgeBaseID,
+			RunID:            run.ID,
+			PageKey:          page.Slug,
+			Title:            page.Title,
+			PageType:         types.WikiPageTypeSynthesis,
+			Category:         page.Category,
+			Status:           types.CodeWikiRunPageStatusPending,
 			ValidationStatus: "pending",
-			Scope:           page.Scope,
+			Scope:            page.Scope,
 		}
 		if err := s.repo.UpsertRunPage(ctx, row); err != nil {
 			logger.Errorf(ctx, "code wiki: persist planned page %s failed: %v", page.Slug, err)
@@ -414,7 +414,8 @@ type codeWikiRunState struct {
 	// display info for prompts
 	manifest []string
 	// planned pages (filled after the planning stage; used for neighbor links)
-	pages []codeWikiPlannedPage
+	pages     []codeWikiPlannedPage
+	relations []codebase.RelationEdge
 	// frozen capability report for limits disclosure
 	capabilities *types.CodeWikiCapabilityReport
 	// interruptCheck returns errCodeWikiRunCanceled / errCodeWikiRunPaused
@@ -595,6 +596,17 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 	repoSummaries, err := s.analyzeRepositories(ctx, state)
 	if err != nil {
 		return err
+	}
+	if len(state.scopes) > 1 && state.capabilities != nil && state.capabilities.HasCapability(types.CodeWikiCapCrossRepo) {
+		s.setRunPhase(ctx, run, types.CodeWikiRunStatusAnalyzing, "分析跨仓库依赖与导入关系")
+		scopes := make([]codebase.SnapshotScope, 0, len(state.scopes))
+		for _, scope := range state.scopes {
+			scopes = append(scopes, scope)
+		}
+		state.relations, err = state.provider.QueryCrossRepository(ctx, scopes, "", codebase.QueryOptions{Limit: 24})
+		if err != nil && !errors.Is(err, codebase.ErrUnsupported) {
+			return fmt.Errorf("cross-repository analysis failed: %w", err)
+		}
 	}
 	if err := state.interruptCheck(); err != nil {
 		return err
@@ -838,6 +850,11 @@ func (s *codeWikiService) planOutline(ctx context.Context, state *codeWikiRunSta
 		repoBlocks = append(repoBlocks, fmt.Sprintf("repo_id=%s\nname=%s\nrole=%s\ncommit=%s\ntop_dirs=%s\nmanifests:\n%s",
 			repoID, summary.Repo, summary.Role, summary.Commit, strings.Join(summary.TopDirs, ", "), summary.Manifests))
 	}
+	for _, edge := range state.relations {
+		repoBlocks = append(repoBlocks, fmt.Sprintf("cross-repository %s candidate: %s (%s:%d) -> %s (%s:%d); package use is not proof of function calls or installed-version equality",
+			edge.Kind, state.repoNames[edge.FromRepositoryID], edge.FromPath, edge.StartLine,
+			state.repoNames[edge.ToRepositoryID], edge.ToPath, edge.ToStartLine))
+	}
 	prompt := strings.NewReplacer(
 		"{{.Repos}}", strings.Join(repoBlocks, "\n\n"),
 		"{{.DefaultToc}}", agent.CodeWikiDefaultToc,
@@ -978,6 +995,59 @@ func (s *codeWikiService) generateOnePage(ctx context.Context, state *codeWikiRu
 func (s *codeWikiService) retrieveEvidence(ctx context.Context, state *codeWikiRunState, page codeWikiPlannedPage) []types.CodeWikiEvidenceSpec {
 	queries := codeWikiEvidenceQueries(page)
 	var specs []types.CodeWikiEvidenceSpec
+	// Reserve paired source evidence for relationships so page generation can
+	// substantiate both endpoints instead of inferring them from package names.
+	if page.Category == types.CodeWikiPageCategoryArchitecture || page.Category == types.CodeWikiPageCategoryInteraction ||
+		page.Category == types.CodeWikiPageCategoryOverview || page.Category == types.CodeWikiPageCategoryRepository ||
+		page.Category == types.CodeWikiPageCategoryWorkflow {
+		seen := make(map[string]bool)
+		seenRelations := make(map[string]bool)
+		relations := append([]codebase.RelationEdge(nil), state.relations...)
+		// Prefer real business-code imports, and distribute the small evidence
+		// budget across package pairs instead of repeating one common library.
+		sort.SliceStable(relations, func(i, j int) bool {
+			return relations[i].Kind == "package_import" && relations[j].Kind != "package_import"
+		})
+		for _, edge := range relations {
+			if len(specs) >= codeWikiMaxEvidencePerPage/2 {
+				break
+			}
+			relationKey := edge.FromRepositoryID + ":" + edge.ToRepositoryID + ":" + edge.ToSymbol
+			if seenRelations[relationKey] {
+				continue
+			}
+			from, fromOK := state.scopes[edge.FromRepositoryID]
+			to, toOK := state.scopes[edge.ToRepositoryID]
+			if !fromOK || !toOK {
+				continue
+			}
+			fromText, fromErr := s.readSource(ctx, state, from, edge.FromPath, edge.StartLine, edge.EndLine)
+			toText, toErr := s.readSource(ctx, state, to, edge.ToPath, edge.ToStartLine, edge.ToEndLine)
+			if fromErr != nil || toErr != nil {
+				continue
+			}
+			seenRelations[relationKey] = true
+			for _, endpoint := range []struct {
+				scope      codebase.SnapshotScope
+				path       string
+				start, end int
+				quote      string
+			}{
+				{from, edge.FromPath, edge.StartLine, edge.EndLine, fromText},
+				{to, edge.ToPath, edge.ToStartLine, edge.ToEndLine, toText},
+			} {
+				key := fmt.Sprintf("%s:%s:%d", endpoint.scope.RepositoryID, endpoint.path, endpoint.start)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				specs = append(specs, types.CodeWikiEvidenceSpec{ID: fmt.Sprintf("E%d", len(specs)+1),
+					RepositoryID: endpoint.scope.RepositoryID, SnapshotID: endpoint.scope.SnapshotID,
+					CommitSHA: endpoint.scope.CommitSHA, Path: endpoint.path, StartLine: endpoint.start, EndLine: endpoint.end,
+					Type: types.CodeWikiEvidenceTypeFile, Quote: truncateCodeWikiString(endpoint.quote, 400)})
+			}
+		}
+	}
 	repoOrder := make([]string, 0, len(state.scopes))
 	for repoID := range state.scopes {
 		repoOrder = append(repoOrder, repoID)
