@@ -547,7 +547,8 @@ func (CodeWikiAnalysisArtifact) TableName() string { return "code_wiki_analysis_
 
 // Code Wiki run status values. A run moves pending → (phases) → staged →
 // published; the previously published run transitions to superseded when a
-// new run publishes. failed/canceled are terminal.
+// new run publishes. failed/canceled are terminal. paused is a resting state:
+// the plan and completed pages persist, resume continues the remaining pages.
 const (
 	CodeWikiRunStatusPending    = "pending"
 	CodeWikiRunStatusPreparing  = "preparing"  // freezing snapshots / preparing artifacts
@@ -556,6 +557,7 @@ const (
 	CodeWikiRunStatusGenerating = "generating" // per-page evidence + generation
 	CodeWikiRunStatusValidating = "validating" // evidence reference validation
 	CodeWikiRunStatusStaged     = "staged"     // candidate pages await publish
+	CodeWikiRunStatusPaused     = "paused"     // user-paused; resume continues
 	CodeWikiRunStatusPublishing = "publishing"
 	CodeWikiRunStatusPublished  = "published"
 	CodeWikiRunStatusSuperseded = "superseded"
@@ -611,6 +613,9 @@ type CodeWikiRun struct {
 	// CancelRequested lets users flag cancellation; the worker observes it
 	// between stages and transitions the run to canceled.
 	CancelRequested bool `json:"cancel_requested" gorm:"default:false"`
+	// PauseRequested lets users pause between pages; the worker observes it
+	// between stages and transitions the run to paused (resumable).
+	PauseRequested bool `json:"pause_requested" gorm:"default:false"`
 	// IdempotencyKey deduplicates concurrent submissions
 	IdempotencyKey string `json:"idempotency_key,omitempty" gorm:"type:varchar(128);index"`
 	// LeaseOwner identifies the worker process holding this run;
@@ -657,6 +662,7 @@ func (CodeWikiRunRepository) TableName() string { return "code_wiki_run_reposito
 
 // Run page staging status values.
 const (
+	CodeWikiRunPageStatusPending   = "pending"  // planned, not yet generated (persisted plan)
 	CodeWikiRunPageStatusStaged    = "staged"
 	CodeWikiRunPageStatusConflict  = "conflict" // live page edited since baseline
 	CodeWikiRunPageStatusPublished = "published"
@@ -700,10 +706,13 @@ type CodeWikiRunPage struct {
 	ValidationStatus string `json:"validation_status" gorm:"type:varchar(32);default:'pending'"`
 	// Structured validation errors (missing files, out-of-range lines, …)
 	ValidationErrors JSON `json:"validation_errors,omitempty" gorm:"type:jsonb"`
-	// Staging status: staged | conflict | published | skipped
+	// Staging status: pending | staged | conflict | published | skipped
 	Status string `json:"status" gorm:"type:varchar(32);default:'staged'"`
 	// GenerationError records per-page failure (page omitted from publish)
 	GenerationError string `json:"generation_error,omitempty"`
+	// Scope is the planned page scope (analysis focus, persisted so a paused
+	// run can resume the remaining pages without re-planning).
+	Scope string `json:"scope,omitempty" gorm:"type:varchar(1024)"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

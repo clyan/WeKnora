@@ -274,7 +274,8 @@ func (s *codeWikiService) ListRuns(ctx context.Context, kbID string) ([]*types.C
 }
 
 // CancelRun flags cancellation; the worker observes the flag between stages
-// and between pages. A staged run cannot be canceled — publish or leave it.
+// and between pages. A staged run has no live worker, so it is marked
+// canceled directly — discarding the candidates affects nothing published.
 func (s *codeWikiService) CancelRun(ctx context.Context, kbID, runID string) error {
 	kb, err := s.requireCodeWikiKB(ctx, kbID)
 	if err != nil {
@@ -288,7 +289,16 @@ func (s *codeWikiService) CancelRun(ctx context.Context, kbID, runID string) err
 		return apperrors.NewBadRequestError("run has already finished")
 	}
 	if run.Status == types.CodeWikiRunStatusStaged {
-		return apperrors.NewBadRequestError("run is staged awaiting publish")
+		now := time.Now().UTC()
+		run.Status = types.CodeWikiRunStatusCanceled
+		run.Phase = "已取消（候选内容已丢弃）"
+		run.FinishedAt = &now
+		if err := s.repo.UpdateRun(ctx, run); err != nil {
+			return err
+		}
+		recordKBActivity(ctx, s.audit, kb.TenantID, kbID, types.AuditActionKBUpdated,
+			"code_wiki_run", run.ID, types.AuditOutcomeSuccess, map[string]any{"canceled": "staged"})
+		return nil
 	}
 	run.CancelRequested = true
 	if err := s.repo.UpdateRun(ctx, run); err != nil {
@@ -297,6 +307,86 @@ func (s *codeWikiService) CancelRun(ctx context.Context, kbID, runID string) err
 	recordKBActivity(ctx, s.audit, kb.TenantID, kbID, types.AuditActionKBUpdated,
 		"code_wiki_run", run.ID, types.AuditOutcomeSuccess, map[string]any{"cancel_requested": true})
 	return nil
+}
+
+// persistPlannedPages writes the plan as pending run-page rows so a pause (or
+// worker crash) can resume the remaining pages without re-planning, and the
+// UI can show per-page progress before pages complete.
+func (s *codeWikiService) persistPlannedPages(ctx context.Context, run *types.CodeWikiRun, pages []codeWikiPlannedPage) {
+	for _, page := range pages {
+		row := &types.CodeWikiRunPage{
+			ID:              uuid.NewString(),
+			TenantID:        run.TenantID,
+			KnowledgeBaseID: run.KnowledgeBaseID,
+			RunID:           run.ID,
+			PageKey:         page.Slug,
+			Title:           page.Title,
+			PageType:        types.WikiPageTypeSynthesis,
+			Category:        page.Category,
+			Status:          types.CodeWikiRunPageStatusPending,
+			ValidationStatus: "pending",
+			Scope:           page.Scope,
+		}
+		if err := s.repo.UpsertRunPage(ctx, row); err != nil {
+			logger.Errorf(ctx, "code wiki: persist planned page %s failed: %v", page.Slug, err)
+		}
+	}
+}
+
+// PauseRun flags a pause; the worker observes it between stages/pages and
+// parks the run in paused (resumable, keeps the active-run slot).
+func (s *codeWikiService) PauseRun(ctx context.Context, kbID, runID string) error {
+	if _, err := s.requireCodeWikiKB(ctx, kbID); err != nil {
+		return err
+	}
+	run, err := s.repo.GetRun(ctx, kbID, runID)
+	if err != nil {
+		return err
+	}
+	if types.IsTerminalCodeWikiRunStatus(run.Status) || run.Status == types.CodeWikiRunStatusStaged {
+		return apperrors.NewBadRequestError("run is not in a pausable state")
+	}
+	if run.Status == types.CodeWikiRunStatusPaused {
+		return nil // idempotent
+	}
+	run.PauseRequested = true
+	return s.repo.UpdateRun(ctx, run)
+}
+
+// ResumeRun continues a paused run: the persisted plan is picked up where it
+// left off (staged pages are kept, pending pages regenerate).
+func (s *codeWikiService) ResumeRun(ctx context.Context, kbID, runID string) error {
+	if _, err := s.requireCodeWikiKB(ctx, kbID); err != nil {
+		return err
+	}
+	run, err := s.repo.GetRun(ctx, kbID, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status != types.CodeWikiRunStatusPaused {
+		return apperrors.NewBadRequestError("run is not paused")
+	}
+	// Clear the pause flag BEFORE enqueueing so the worker does not observe
+	// its own pause request on the resumed pass.
+	run.PauseRequested = false
+	if err := s.repo.UpdateRun(ctx, run); err != nil {
+		return err
+	}
+	var cfg codeWikiRunConfig
+	if err := json.Unmarshal(run.ConfigSnapshot, &cfg); err != nil {
+		return fmt.Errorf("decode frozen config: %w", err)
+	}
+	timeout := time.Duration(cfg.TimeoutMinutes) * time.Minute
+	if timeout <= 0 {
+		timeout = time.Duration(types.DefaultCodeWikiRunTimeoutMinutes) * time.Minute
+	}
+	payload := &types.CodeWikiGeneratePayload{
+		TenantID:        run.TenantID,
+		KnowledgeBaseID: kbID,
+		RunID:           run.ID,
+		Initiator:       types.TaskInitiatorFromContext(ctx),
+	}
+	return s.enqueueCodeWikiTask(ctx, types.TypeCodeWikiGenerate, payload, timeout)
 }
 
 // RetryRun creates a FRESH run after a failed/canceled one. Snapshots and
@@ -327,7 +417,9 @@ type codeWikiRunState struct {
 	pages []codeWikiPlannedPage
 	// frozen capability report for limits disclosure
 	capabilities *types.CodeWikiCapabilityReport
-	cancelCheck  func() bool
+	// interruptCheck returns errCodeWikiRunCanceled / errCodeWikiRunPaused
+	// (nil to continue), observed between stages and between pages.
+	interruptCheck func() error
 }
 
 // ProcessCodeWikiGenerate is the asynq handler backing TypeCodeWikiGenerate.
@@ -344,7 +436,7 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 		logger.Warnf(ctx, "code wiki generate: run %s not found or KB mismatch, dropping", payload.RunID)
 		return nil
 	}
-	if run.Status != types.CodeWikiRunStatusPending {
+	if run.Status != types.CodeWikiRunStatusPending && run.Status != types.CodeWikiRunStatusPaused {
 		logger.Infof(ctx, "code wiki generate: run %s already %s, dropping", run.ID, run.Status)
 		return nil
 	}
@@ -367,6 +459,27 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 	defer s.finalizeRunOnError(ctx, run)
 
 	if err := s.executeRun(ctx, run, payload); err != nil {
+		switch {
+		case errors.Is(err, errCodeWikiRunCanceled):
+			// User cancellation observed between stages/pages.
+			now := time.Now().UTC()
+			run.Status = types.CodeWikiRunStatusCanceled
+			run.Phase = "已取消"
+			run.ErrorMessage = ""
+			run.FinishedAt = &now
+			_ = s.repo.UpdateRun(ctx, run)
+			logger.Infof(ctx, "code wiki generate: run %s canceled by user", run.ID)
+			return nil
+		case errors.Is(err, errCodeWikiRunPaused):
+			// User pause observed between pages: the plan and completed pages
+			// persist; resume re-leases the run and continues.
+			run.Status = types.CodeWikiRunStatusPaused
+			run.Phase = fmt.Sprintf("已暂停（已完成 %d/%d 页），可继续", run.CompletedPages, run.TotalPages)
+			_ = s.repo.UpdateRun(ctx, run)
+			logger.Infof(ctx, "code wiki generate: run %s paused by user (%d/%d pages)",
+				run.ID, run.CompletedPages, run.TotalPages)
+			return nil
+		}
 		logger.Errorf(ctx, "code wiki generate: run %s failed: %v", run.ID, err)
 		run.Status = types.CodeWikiRunStatusFailed
 		run.ErrorMessage = types.FormatCodeWikiError(err)
@@ -384,13 +497,15 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 // finalizeRunOnError ensures a worker crash (context cancellation / panic
 // recovery is handled by asynq) doesn't strand the run mid-phase: on any
 // non-terminal exit the run is marked failed so the UI never shows a
-// perpetual spinner.
+// perpetual spinner. Paused is a deliberate resting state and is left alone.
 func (s *codeWikiService) finalizeRunOnError(ctx context.Context, run *types.CodeWikiRun) {
-	if types.IsTerminalCodeWikiRunStatus(run.Status) || run.Status == types.CodeWikiRunStatusStaged {
+	if types.IsTerminalCodeWikiRunStatus(run.Status) || run.Status == types.CodeWikiRunStatusStaged ||
+		run.Status == types.CodeWikiRunStatusPaused {
 		return
 	}
 	refreshed, err := s.repo.GetRunByID(context.Background(), run.ID)
-	if err != nil || types.IsTerminalCodeWikiRunStatus(refreshed.Status) || refreshed.Status == types.CodeWikiRunStatusStaged {
+	if err != nil || types.IsTerminalCodeWikiRunStatus(refreshed.Status) ||
+		refreshed.Status == types.CodeWikiRunStatusStaged || refreshed.Status == types.CodeWikiRunStatusPaused {
 		return
 	}
 	if ctx.Err() != nil {
@@ -417,18 +532,23 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		cfg:     cfg,
 		builtin: s.registry.Builtin(),
 	}
-	state.cancelCheck = func() bool {
+	// interruptCheck observes user flags (cancel / pause) and context death,
+	// returning the matching sentinel so callers transition the run cleanly.
+	state.interruptCheck = func() error {
 		if ctx.Err() != nil {
-			return true
+			return errCodeWikiRunCanceled
 		}
 		refreshed, err := s.repo.GetRunByID(ctx, run.ID)
 		if err != nil {
-			return false
+			return nil
 		}
 		if refreshed.CancelRequested {
-			return true
+			return errCodeWikiRunCanceled
 		}
-		return false
+		if refreshed.PauseRequested {
+			return errCodeWikiRunPaused
+		}
+		return nil
 	}
 
 	// Provider from the FROZEN profile snapshot, re-resolved live so a
@@ -465,8 +585,8 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 	if err := s.buildRunScopes(ctx, state); err != nil {
 		return err
 	}
-	if state.cancelCheck() {
-		return errCodeWikiRunCanceled
+	if err := state.interruptCheck(); err != nil {
+		return err
 	}
 
 	// Stage: analysis (structure + manifests; cross-repo handled during
@@ -476,29 +596,56 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 	if err != nil {
 		return err
 	}
-	if state.cancelCheck() {
-		return errCodeWikiRunCanceled
+	if err := state.interruptCheck(); err != nil {
+		return err
 	}
 
-	// Stage: outline planning.
-	s.setRunPhase(ctx, run, types.CodeWikiRunStatusPlanning, "规划文档目录")
+	// Stage: outline planning — or resume from the persisted plan when the
+	// run already carries page rows (a previous pass paused after planning).
 	lang := codeWikiRunLanguage(ctx, cfg)
-	pages, err := s.planOutline(ctx, state, repoSummaries, lang)
+	var pages, pagesToGenerate []codeWikiPlannedPage
+	persisted, err := s.repo.ListRunPages(ctx, run.ID)
 	if err != nil {
 		return err
+	}
+	if len(persisted) > 0 {
+		// Resume: staged results from the earlier pass are kept as-is; only
+		// pending pages still need generation.
+		for _, p := range persisted {
+			planned := codeWikiPlannedPage{Slug: p.PageKey, Title: p.Title, Category: p.Category, Scope: p.Scope}
+			pages = append(pages, planned)
+			if p.Status == types.CodeWikiRunPageStatusPending {
+				pagesToGenerate = append(pagesToGenerate, planned)
+			}
+		}
+		s.setRunPhase(ctx, run, types.CodeWikiRunStatusGenerating,
+			fmt.Sprintf("继续生成（剩余 %d/%d 页）", len(pagesToGenerate), len(pages)))
+	} else {
+		s.setRunPhase(ctx, run, types.CodeWikiRunStatusPlanning, "规划文档目录")
+		pages, err = s.planOutline(ctx, state, repoSummaries, lang)
+		if err != nil {
+			return err
+		}
+		pagesToGenerate = pages
+		// Persist the plan as pending rows: pause/resume (and crash recovery)
+		// continue the remaining pages without re-planning, and the UI shows
+		// per-page progress before pages complete.
+		s.persistPlannedPages(ctx, run, pages)
 	}
 	state.pages = pages
 	run.TotalPages = len(pages)
 	_ = s.repo.UpdateRun(ctx, run)
-	if state.cancelCheck() {
-		return errCodeWikiRunCanceled
+	if err := state.interruptCheck(); err != nil {
+		return err
 	}
 
 	// Stage: per-page evidence + generation + validation.
-	s.setRunPhase(ctx, run, types.CodeWikiRunStatusGenerating, fmt.Sprintf("生成文档（共 %d 页）", len(pages)))
-	for _, page := range pages {
-		if state.cancelCheck() {
-			return errCodeWikiRunCanceled
+	if len(persisted) == 0 {
+		s.setRunPhase(ctx, run, types.CodeWikiRunStatusGenerating, fmt.Sprintf("生成文档（共 %d 页）", len(pages)))
+	}
+	for _, page := range pagesToGenerate {
+		if err := state.interruptCheck(); err != nil {
+			return err
 		}
 		if run.ModelCalls >= cfg.MaxModelCalls {
 			run.Phase = "已达到本轮模型调用上限，剩余页面跳过"
@@ -509,11 +656,28 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		_ = s.repo.UpdateRun(ctx, run)
 	}
 
-	// Stage: done — staged awaiting explicit publish.
+	// Stage: done — staged awaiting explicit publish. A run with zero
+	// completed pages fails instead: staging it would surface a publish
+	// button that can only error ("run has no publishable pages") and,
+	// being staged, it could not even be canceled.
 	now := time.Now().UTC()
+	run.FinishedAt = &now
+	if run.CompletedPages == 0 {
+		run.Status = types.CodeWikiRunStatusFailed
+		run.Phase = "生成失败"
+		if run.ErrorMessage == "" {
+			run.ErrorMessage = fmt.Sprintf(
+				"all %d planned pages failed or were skipped; open the page list for per-page reasons (failed=%d)",
+				run.TotalPages, run.FailedPages)
+		}
+		if err := s.repo.UpdateRun(ctx, run); err != nil {
+			return err
+		}
+		logger.Errorf(ctx, "code wiki generate: run %s failed (%d/%d pages produced)", run.ID, run.CompletedPages, run.TotalPages)
+		return nil
+	}
 	run.Status = types.CodeWikiRunStatusStaged
 	run.Phase = "等待发布"
-	run.FinishedAt = &now
 	if err := s.repo.UpdateRun(ctx, run); err != nil {
 		return err
 	}
@@ -525,7 +689,10 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 	return nil
 }
 
-var errCodeWikiRunCanceled = errors.New("code wiki run canceled")
+var (
+	errCodeWikiRunCanceled = errors.New("code wiki run canceled")
+	errCodeWikiRunPaused   = errors.New("code wiki run paused")
+)
 
 func (s *codeWikiService) setRunPhase(ctx context.Context, run *types.CodeWikiRun, status, phase string) {
 	run.Status = status

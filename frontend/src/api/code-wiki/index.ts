@@ -100,7 +100,7 @@ export interface CodeWikiEvidenceSpec {
 
 export type CodeWikiRunStatus =
   | 'pending' | 'preparing' | 'analyzing' | 'planning' | 'generating'
-  | 'validating' | 'staged' | 'publishing' | 'published' | 'superseded'
+  | 'validating' | 'staged' | 'paused' | 'publishing' | 'published' | 'superseded'
   | 'failed' | 'canceled';
 
 export interface CodeWikiRun {
@@ -135,7 +135,7 @@ export interface CodeWikiRunPage {
   evidence?: CodeWikiEvidenceSpec[] | null;
   baseline_version: number;
   validation_status: string;
-  status: 'staged' | 'conflict' | 'published' | 'skipped';
+  status: 'pending' | 'staged' | 'conflict' | 'published' | 'skipped';
   generation_error?: string;
 }
 
@@ -258,6 +258,16 @@ export function getCodeWikiRun(kbId: string, runId: string) {
 
 export function cancelCodeWikiRun(kbId: string, runId: string) {
   return post(`/api/v1/knowledgebase/${kbId}/code-wiki/runs/${runId}/cancel`);
+}
+
+// 暂停：worker 在页面间隔观察到标志后进入 paused（计划与已完成页保留）。
+export function pauseCodeWikiRun(kbId: string, runId: string) {
+  return post(`/api/v1/knowledgebase/${kbId}/code-wiki/runs/${runId}/pause`);
+}
+
+// 继续：从持久化的计划接着生成剩余页面。
+export function resumeCodeWikiRun(kbId: string, runId: string) {
+  return post(`/api/v1/knowledgebase/${kbId}/code-wiki/runs/${runId}/resume`);
 }
 
 export function retryCodeWikiRun(kbId: string, runId: string) {

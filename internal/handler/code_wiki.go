@@ -241,6 +241,32 @@ func (h *CodeWikiHandler) CancelRun(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"success": true})
 }
 
+// PauseRun handles POST /knowledgebase/:kb_id/code-wiki/runs/:id/pause.
+func (h *CodeWikiHandler) PauseRun(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	if err := h.service.PauseRun(c.Request.Context(), kbID, c.Param("id")); err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"success": true})
+}
+
+// ResumeRun handles POST /knowledgebase/:kb_id/code-wiki/runs/:id/resume.
+func (h *CodeWikiHandler) ResumeRun(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	if err := h.service.ResumeRun(c.Request.Context(), kbID, c.Param("id")); err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"success": true})
+}
+
 // RetryRun handles POST /knowledgebase/:kb_id/code-wiki/runs/:id/retry.
 func (h *CodeWikiHandler) RetryRun(c *gin.Context) {
 	kbID, ok := h.resolveCodeWikiKB(c)

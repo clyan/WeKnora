@@ -486,6 +486,17 @@ start_app() {
         export MILVUS_ADDRESS=127.0.0.1:19530
         export NEO4J_URI=bolt://127.0.0.1:7687
         export QDRANT_HOST=127.0.0.1
+        # The .env proxy addresses point container→host via
+        # host.docker.internal, which does not resolve on the host itself;
+        # the proxy is directly reachable on loopback here.
+        local proxy_http="${HTTP_PROXY:-${http_proxy:-}}"
+        local proxy_https="${HTTPS_PROXY:-${https_proxy:-}}"
+        if [ -n "$proxy_http" ]; then
+            export HTTP_PROXY="${proxy_http//host.docker.internal/127.0.0.1}" http_proxy="${proxy_http//host.docker.internal/127.0.0.1}"
+        fi
+        if [ -n "$proxy_https" ]; then
+            export HTTPS_PROXY="${proxy_https//host.docker.internal/127.0.0.1}" https_proxy="${proxy_https//host.docker.internal/127.0.0.1}"
+        fi
     fi
     export DOCREADER_TRANSPORT="${DOCREADER_TRANSPORT:-grpc}"
 
@@ -513,8 +524,8 @@ start_app() {
     log_info "数据库地址: $DB_HOST:${DB_PORT:-5432}"
     
     export CGO_CFLAGS="-Wno-deprecated-declarations -Wno-gnu-folding-constant"
-    if [[ "$(uname)" == "Darwin" ]]; then
-      export CGO_LDFLAGS="-Wl,-no_warn_duplicate_libraries"
+    if [[ "$(uname)" == "Darwin" ]] && /usr/bin/ld -help 2>&1 | grep -q -- '-no_warn_duplicate_libraries'; then
+      export CGO_LDFLAGS="${CGO_LDFLAGS:-} -Wl,-no_warn_duplicate_libraries"
     fi
 
     enable_anydoc_build_tag

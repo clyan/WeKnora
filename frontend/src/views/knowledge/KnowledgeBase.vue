@@ -2393,7 +2393,7 @@ async function createNewSession(value: string): Promise<void> {
       </div>
 
       <!-- Code wiki repositories / provider / runs management -->
-      <div v-if="isCodeWiki && activeKbTab === 'codewiki'" class="wiki-main-area">
+      <div v-if="isCodeWiki && activeKbTab === 'codewiki'" class="wiki-main-area wiki-main-area--codewiki">
         <CodeWikiPanel v-if="kbId" :knowledge-base-id="kbId" :can-edit="canEdit"
           @open-kb-settings="handleOpenKBSettings" />
       </div>
@@ -2846,6 +2846,12 @@ async function createNewSession(value: string): Promise<void> {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+// CodeWikiPanel has no internal scroll surface of its own (unlike
+// WikiBrowser, which manages its own scrolling) — the page scrolls here.
+.wiki-main-area--codewiki {
+  overflow-y: auto;
 }
 
 // 与列表页一致：浅灰底圆角区，左侧筛选为白底卡片

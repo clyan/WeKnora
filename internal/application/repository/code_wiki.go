@@ -451,14 +451,17 @@ func (r *codeWikiRepository) UpdateRun(ctx context.Context, run *types.CodeWikiR
 	return r.db.WithContext(ctx).Save(run).Error
 }
 
-// TryAcquireRunLease claims a pending run for a worker atomically. The
-// conditional UPDATE means only one worker can flip pending→preparing.
+// TryAcquireRunLease claims a pending or paused (resumed) run for a worker
+// atomically. The conditional UPDATE means only one worker can flip the run
+// into preparing.
 func (r *codeWikiRepository) TryAcquireRunLease(ctx context.Context, runID, owner string, ttlSeconds int) (bool, error) {
 	now := time.Now().UTC()
 	expires := now.Add(time.Duration(ttlSeconds) * time.Second)
 	res := r.db.WithContext(ctx).
 		Model(&types.CodeWikiRun{}).
-		Where("id = ? AND status = ?", runID, types.CodeWikiRunStatusPending).
+		Where("id = ? AND status IN ?", runID, []string{
+			types.CodeWikiRunStatusPending, types.CodeWikiRunStatusPaused,
+		}).
 		Updates(map[string]interface{}{
 			"status":           types.CodeWikiRunStatusPreparing,
 			"lease_owner":      owner,
@@ -502,6 +505,11 @@ func (r *codeWikiRepository) ReplaceRunRepositories(ctx context.Context, runID s
 		}
 		for _, entry := range entries {
 			entry.ID = uuid.NewString()
+			// Stamp the owning run here — the service builds entries before
+			// the run row is persisted, and an unstamped RunID silently
+			// orphans the manifest: ListRunRepositories then finds nothing
+			// and the run generates against empty scopes.
+			entry.RunID = runID
 			if err := tx.Create(entry).Error; err != nil {
 				return err
 			}
@@ -528,7 +536,7 @@ func (r *codeWikiRepository) UpsertRunPage(ctx context.Context, page *types.Code
 		Columns: []clause.Column{{Name: "run_id"}, {Name: "page_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"title", "page_type", "category", "category_path", "content", "summary",
-			"evidence", "baseline_version", "baseline_last_edit_source",
+			"evidence", "baseline_version", "baseline_last_edit_source", "scope",
 			"validation_status", "validation_errors", "status", "generation_error", "updated_at",
 		}),
 	}).Create(page).Error

@@ -121,12 +121,31 @@
           <p class="cw-section-desc">{{ $t('codeWiki.runs.description') }}</p>
         </div>
         <div class="cw-section-actions">
-          <t-button v-if="activeRun && activeRun.status === 'staged'" size="small" theme="primary"
-            :disabled="!canEdit" @click="publishActiveRun">
-            {{ $t('codeWiki.runs.publish') }}
-          </t-button>
-          <t-button v-else-if="activeRun" variant="outline" size="small" :disabled="!canEdit"
-            @click="cancelActiveRun">{{ $t('codeWiki.runs.cancel') }}</t-button>
+          <template v-if="activeRun">
+            <!-- staged: publish, or discard the candidates -->
+            <template v-if="activeRun.status === 'staged'">
+              <t-button size="small" theme="primary" :disabled="!canEdit" @click="publishActiveRun">
+                {{ $t('codeWiki.runs.publish') }}
+              </t-button>
+              <t-button variant="outline" size="small" :disabled="!canEdit"
+                @click="cancelActiveRun">{{ $t('codeWiki.runs.discard') }}</t-button>
+            </template>
+            <!-- paused: resume or cancel -->
+            <template v-else-if="activeRun.status === 'paused'">
+              <t-button size="small" theme="primary" :disabled="!canEdit" @click="resumeActiveRun">
+                {{ $t('codeWiki.runs.resume') }}
+              </t-button>
+              <t-button variant="outline" size="small" :disabled="!canEdit"
+                @click="cancelActiveRun">{{ $t('codeWiki.runs.cancel') }}</t-button>
+            </template>
+            <!-- in flight: pause or cancel -->
+            <template v-else>
+              <t-button variant="outline" size="small" :disabled="!canEdit"
+                @click="pauseActiveRun">{{ $t('codeWiki.runs.pause') }}</t-button>
+              <t-button variant="outline" size="small" :disabled="!canEdit"
+                @click="cancelActiveRun">{{ $t('codeWiki.runs.cancel') }}</t-button>
+            </template>
+          </template>
           <t-button v-else size="small" theme="primary" :disabled="!canEdit || !readyRepositoryCount"
             @click="createRun">
             {{ $t('codeWiki.runs.create') }}
@@ -155,6 +174,25 @@
           </t-radio-group>
         </div>
         <p v-if="activeRun.error_message" class="run-error">{{ activeRun.error_message }}</p>
+        <!-- Per-page progress: planned pages show as pending before generation
+             reaches them; failures carry the concrete reason. -->
+        <ul v-if="runPages.length" class="run-page-list">
+          <li v-for="p in runPages" :key="p.id" class="run-page-item">
+            <span class="run-page-name">{{ p.title || p.page_key }}</span>
+            <t-tag v-if="p.generation_error" size="small" variant="light" theme="danger">
+              {{ $t('codeWiki.runs.pageFailed') }}
+            </t-tag>
+            <t-tag v-else-if="p.status === 'pending'" size="small" variant="light" theme="default">
+              {{ $t('codeWiki.runs.pagePending') }}
+            </t-tag>
+            <t-tag v-else size="small" variant="light" theme="success">
+              {{ $t('codeWiki.runs.pageDone') }}
+            </t-tag>
+            <t-tooltip v-if="p.generation_error" :content="p.generation_error" placement="top">
+              <span class="run-page-error">{{ p.generation_error }}</span>
+            </t-tooltip>
+          </li>
+        </ul>
       </div>
 
       <t-table v-if="runs.length" row-key="id" :data="runs" :columns="runColumns" size="small" :loading="runsLoading">
@@ -188,11 +226,13 @@ import { useI18n } from 'vue-i18n'
 import { MessagePlugin } from 'tdesign-vue-next'
 import {
   listCodeWikiRepositories, syncCodeWikiRepositories, deleteCodeWikiRepository,
-  listCodeWikiRuns, createCodeWikiRun, cancelCodeWikiRun, retryCodeWikiRun,
-  publishCodeWikiRun, getCodeWikiAnalysisProfile, testCodeWikiAnalysisProfile,
+  listCodeWikiRuns, createCodeWikiRun, cancelCodeWikiRun, pauseCodeWikiRun,
+  resumeCodeWikiRun, retryCodeWikiRun, publishCodeWikiRun, getCodeWikiRun,
+  getCodeWikiAnalysisProfile, testCodeWikiAnalysisProfile,
 } from '@/api/code-wiki'
 import type {
   CodeWikiAnalysisProfile, CodeWikiCapabilityReport, CodeWikiRepositoryBinding, CodeWikiRun,
+  CodeWikiRunPage,
 } from '@/api/code-wiki'
 import { listDataSources } from '@/api/datasource'
 import CodeWikiRepositoryDialog from './CodeWikiRepositoryDialog.vue'
@@ -277,6 +317,27 @@ const loadRuns = async () => {
   }
 }
 
+// Per-page progress for the active run (planned pages appear as pending
+// before generation reaches them; errors carry the per-page reason).
+const runPages = ref<CodeWikiRunPage[]>([])
+let runDetailSeq = 0
+const loadRunDetail = async () => {
+  const seq = ++runDetailSeq
+  const run = activeRun.value
+  if (!run) {
+    runPages.value = []
+    return
+  }
+  try {
+    const res: any = await getCodeWikiRun(props.knowledgeBaseId, run.id)
+    if (seq !== runDetailSeq) return
+    const detail = res?.data ?? res
+    runPages.value = detail?.pages ?? []
+  } catch {
+    // best-effort: the strip degrades to stage + counters
+  }
+}
+
 const loadGitlabSources = async () => {
   try {
     const res: any = await listDataSources(props.knowledgeBaseId)
@@ -289,6 +350,7 @@ const loadGitlabSources = async () => {
 
 const refreshAll = async () => {
   await Promise.all([loadProfile(), loadRepositories(), loadRuns(), loadGitlabSources()])
+  loadRunDetail()
 }
 
 onMounted(() => {
@@ -299,6 +361,7 @@ onMounted(() => {
     if (syncing || activeRun.value) {
       loadRepositories()
       loadRuns()
+      loadRunDetail()
     }
   }, 5000)
 })
@@ -368,6 +431,7 @@ const createRun = async () => {
     await createCodeWikiRun(props.knowledgeBaseId)
     MessagePlugin.success(t('codeWiki.runs.created'))
     loadRuns()
+    loadRunDetail()
   } catch (err: any) {
     MessagePlugin.error(err?.message ?? t('codeWiki.loadFailed'))
   }
@@ -378,6 +442,28 @@ const cancelActiveRun = async () => {
   try {
     await cancelCodeWikiRun(props.knowledgeBaseId, activeRun.value.id)
     MessagePlugin.success(t('codeWiki.runs.cancelRequested'))
+    loadRuns()
+  } catch (err: any) {
+    MessagePlugin.error(err?.message ?? t('codeWiki.loadFailed'))
+  }
+}
+
+const pauseActiveRun = async () => {
+  if (!activeRun.value) return
+  try {
+    await pauseCodeWikiRun(props.knowledgeBaseId, activeRun.value.id)
+    MessagePlugin.success(t('codeWiki.runs.pauseRequested'))
+    loadRuns()
+  } catch (err: any) {
+    MessagePlugin.error(err?.message ?? t('codeWiki.loadFailed'))
+  }
+}
+
+const resumeActiveRun = async () => {
+  if (!activeRun.value) return
+  try {
+    await resumeCodeWikiRun(props.knowledgeBaseId, activeRun.value.id)
+    MessagePlugin.success(t('codeWiki.runs.resumed'))
     loadRuns()
   } catch (err: any) {
     MessagePlugin.error(err?.message ?? t('codeWiki.loadFailed'))
@@ -440,7 +526,7 @@ const runStatusTheme = (status: string): any => {
     case 'published': return 'success'
     case 'failed': return 'danger'
     case 'canceled': case 'superseded': return 'default'
-    case 'staged': return 'warning'
+    case 'staged': case 'paused': return 'warning'
     default: return 'primary'
   }
 }
@@ -610,5 +696,41 @@ const runStatusTheme = (status: string): any => {
   margin: 8px 0 0;
   font-size: 12px;
   color: var(--td-error-color);
+}
+
+.run-page-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-page-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.run-page-name {
+  flex: none;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-page-error {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--td-error-color);
+  opacity: 0.85;
+  cursor: default;
 }
 </style>
