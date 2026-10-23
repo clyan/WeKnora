@@ -663,9 +663,10 @@ func (s *codeWikiService) downloadSnapshot(
 
 // unpackCodeWikiArchive streams a tar.gz archive into dst, applying filter
 // rules and enforcing size/file-count limits. The GitLab archive root
-// directory (<project>-<sha>/) is stripped. Path traversal and non-regular
-// files (symlinks/devices) are rejected outright — snapshots contain plain
-// files only.
+// directory (<project>-<sha>/) is stripped. Path traversal and non-regular,
+// non-link entries (devices/fifos) are rejected outright; tar metadata
+// headers (GitLab's pax_global_header) and symlink/hardlink entries are
+// skipped — snapshots contain plain files only.
 func unpackCodeWikiArchive(r io.Reader, dst string, includeRoots, excludePatterns []string) (int, int64, error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -690,6 +691,19 @@ func unpackCodeWikiArchive(r io.Reader, dst string, includeRoots, excludePattern
 		}
 		name := path.Clean(header.Name)
 		if name == "." || name == "/" {
+			continue
+		}
+		switch header.Typeflag {
+		case tar.TypeXGlobalHeader, tar.TypeXHeader, tar.TypeGNULongName, tar.TypeGNULongLink:
+			// tar metadata, not content — GitLab tarballs carry repository
+			// info in a pax_global_header entry. Drain and move on.
+			if _, err := io.Copy(io.Discard, tr); err != nil {
+				return 0, 0, err
+			}
+			continue
+		case tar.TypeSymlink, tar.TypeLink:
+			// Repositories commonly contain symlinks; they contribute no
+			// snapshot content (link targets never materialize on disk).
 			continue
 		}
 		// Determine the archive root on the first directory entry.
