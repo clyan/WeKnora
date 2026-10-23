@@ -6207,6 +6207,7 @@ export default {
       ref: 'Branch', refPlaceholder: 'Leave empty to use the default branch',
       paths: 'Directories', pathsPlaceholder: 'One directory per line; leave empty to sync the whole project',
       addProject: 'Add project', projectRequired: 'Add at least one GitLab project',
+      codeWikiHint: 'Code Wiki mode: only the GitLab connection is configured here. Add and manage repositories and branches on the knowledge base "Repositories" tab.',
     },
     resourceHint: 'Select the spaces or folders to sync',
     untitled: 'Untitled',

@@ -423,7 +423,7 @@
 
                 <!-- 数据源管理（仅编辑模式） -->
                 <div v-if="editorMode === 'edit' && activeKbId && currentSection === 'datasource'" class="section">
-                  <DataSourceSettings :kb-id="activeKbId" @count="dsCount = $event" />
+                  <DataSourceSettings :kb-id="activeKbId" :kb-type="formData?.type" @count="dsCount = $event" />
                 </div>
 
                 <!-- 共享设置（仅编辑模式） -->

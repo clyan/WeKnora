@@ -592,6 +592,7 @@ export default {
       ref: '分支', refPlaceholder: '留空时使用默认分支',
       paths: '同步目录', pathsPlaceholder: '每行一个目录；留空同步整个项目',
       addProject: '添加项目', projectRequired: '请至少添加一个 GitLab 项目',
+      codeWikiHint: '代码 Wiki 模式：此处只需配置 GitLab 连接信息，仓库与分支请在知识库的「代码仓库」标签页中添加和维护。',
     },
     resourceHint: '选择要同步的内容空间/文件夹',
     untitled: '无标题',

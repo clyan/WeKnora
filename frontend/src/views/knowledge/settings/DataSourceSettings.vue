@@ -16,7 +16,7 @@ import DataSourceSyncLogs from './DataSourceSyncLogs.vue'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
 import { useAuthStore } from '@/stores/auth'
 
-const props = defineProps<{ kbId: string }>()
+const props = defineProps<{ kbId: string; kbType?: string }>()
 const emit = defineEmits<{ (e: 'count', value: number): void }>()
 const { t } = useI18n()
 const authStore = useAuthStore()
@@ -327,6 +327,7 @@ onBeforeUnmount(stopPolling)
     <DataSourceEditorDialog
       v-model:visible="editorVisible"
       :kb-id="kbId"
+      :kb-type="kbType"
       :data-source="editingDs"
       @saved="onEditorSaved"
     />

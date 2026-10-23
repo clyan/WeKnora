@@ -22,6 +22,10 @@ import { getDatasourceIconUrl } from './datasourceIcons'
 
 const props = defineProps<{
   kbId: string
+  // KB type of the owning knowledge base. Under a code_wiki KB the GitLab
+  // data source is connection-only: repositories/branches are managed on the
+  // code-wiki panel, not in settings.projects (backend drops the list).
+  kbType?: string
   dataSource: DataSource | null
 }>()
 
@@ -207,11 +211,19 @@ const driveFolderTokenError = ref('')
 const driveRootLoaded = ref(false)
 const isDriveConnector = (type: string) => type === 'feishu_drive' || type === 'lark_drive'
 const isGitLabConnector = (type: string) => type === 'gitlab'
+// Code-wiki mode: the GitLab source carries credentials/network only; the
+// binding table on the code-wiki panel owns the project set.
+const isCodeWikiKB = computed(() => props.kbType === 'code_wiki')
 
 interface GitLabProjectInput { project_id: string; ref: string; pathsText: string }
 const gitlabProjects = ref<GitLabProjectInput[]>([])
 function syncGitLabProjectsToSettings() {
   if (!isGitLabConnector(form.value.type)) return
+  if (isCodeWikiKB.value) {
+    // Code wiki: settings.projects is ignored server-side; keep it empty.
+    form.value.config.settings.projects = []
+    return
+  }
   form.value.config.settings.projects = gitlabProjects.value
     .filter(project => project.project_id.trim())
     .map(project => ({
@@ -1001,7 +1013,7 @@ async function nextStep() {
     }
     driveFolderTokenError.value = ''
   }
-  if (step.value === 2 && isGitLabConnector(form.value.type)) {
+  if (step.value === 2 && isGitLabConnector(form.value.type) && !isCodeWikiKB.value) {
     syncGitLabProjectsToSettings()
     if (!gitlabProjects.value.some(project => project.project_id.trim())) {
       MessagePlugin.warning(t('datasource.gitlab.projectRequired'))
@@ -1560,6 +1572,13 @@ const drawerConfirmText = computed(() => {
     <!-- Step 2: Select resources -->
     <section v-if="step === 2" class="setting-drawer__section ds-resource-section">
       <template v-if="isGitLabConnector(form.type)">
+        <!-- Code-wiki KBs: repositories/branches live on the code-wiki panel's
+             binding table; this data source only carries the connection. -->
+        <template v-if="isCodeWikiKB">
+          <h4 class="setting-drawer__section-title">{{ t('datasource.gitlab.projects') }}</h4>
+          <t-alert theme="info" :message="t('datasource.gitlab.codeWikiHint')" />
+        </template>
+        <template v-else>
         <h4 class="setting-drawer__section-title">{{ t('datasource.gitlab.projects') }}</h4>
         <p class="ds-resource-hint">{{ t('datasource.gitlab.projectsHint') }}</p>
         <div class="gitlab-project-list">
@@ -1577,6 +1596,7 @@ const drawerConfirmText = computed(() => {
           </div>
           <t-button variant="outline" @click="addGitLabProject"><template #icon><t-icon name="add" /></template>{{ t('datasource.gitlab.addProject') }}</t-button>
         </div>
+        </template>
       </template>
       <template v-else>
       <h4 class="setting-drawer__section-title">{{ t('datasource.step.resources') }}</h4>

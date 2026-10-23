@@ -590,6 +590,7 @@ export default {
       ref: '브랜치', refPlaceholder: '비워 두면 기본 브랜치를 사용합니다',
       paths: '디렉터리', pathsPlaceholder: '한 줄에 하나씩 입력하세요. 비워 두면 전체 프로젝트를 동기화합니다',
       addProject: '프로젝트 추가', projectRequired: 'GitLab 프로젝트를 하나 이상 추가하세요',
+      codeWikiHint: '코드 위키 모드: 여기서는 GitLab 연결만 구성합니다. 저장소와 브랜치는 지식 베이스의 "코드 저장소" 탭에서 추가하고 관리하세요.',
     },
     resourceHint: '동기화할 공간/폴더를 선택하세요',
     untitled: '제목 없음',
