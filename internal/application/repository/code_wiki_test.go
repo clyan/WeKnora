@@ -33,10 +33,12 @@ func newCodeWikiTestDB(t *testing.T) *gorm.DB {
 		&types.CodeWikiSnapshot{},
 		&types.CodeWikiAnalysisArtifact{},
 		&types.CodeWikiRun{},
+		&types.CodeWikiRunEvent{},
 		&types.CodeWikiRunRepository{},
 		&types.CodeWikiRunPage{},
 		&types.CodeWikiPageEvidence{},
 		&types.WikiPage{},
+		&types.WikiFolder{},
 		&types.WikiPageRevision{},
 	))
 	// Partial unique indexes from migrations/versioned/000092.
@@ -77,6 +79,64 @@ func TestCodeWikiProfileLazyCreationIsIdempotent(t *testing.T) {
 	other, err := repo.GetAnalysisProfile(ctx, 7, "kb-2")
 	require.NoError(t, err)
 	require.NotEqual(t, first.ID, other.ID)
+}
+
+func TestCodeWikiProgressDoesNotLoseConcurrentControlRequest(t *testing.T) {
+	for _, control := range []string{"pause", "cancel"} {
+		t.Run(control, func(t *testing.T) {
+			db := newCodeWikiTestDB(t)
+			repo := NewCodeWikiRepository(db)
+			ctx := context.Background()
+			run := &types.CodeWikiRun{KnowledgeBaseID: "kb-1", Status: types.CodeWikiRunStatusGenerating}
+			require.NoError(t, repo.CreateRun(ctx, run))
+			// The worker holds an old copy across an expensive model call.
+			worker, err := repo.GetRunByID(ctx, run.ID)
+			require.NoError(t, err)
+			require.NoError(t, repo.RequestRunControl(ctx, "kb-1", run.ID, control))
+			worker.Phase = "校验代码引用"
+			worker.CompletedPages = 1
+			require.NoError(t, repo.UpdateRun(ctx, worker))
+			stored, err := repo.GetRunByID(ctx, run.ID)
+			require.NoError(t, err)
+			require.Equal(t, 1, stored.CompletedPages)
+			if control == "pause" {
+				require.True(t, stored.PauseRequested)
+			} else {
+				require.True(t, stored.CancelRequested)
+			}
+			// Cross-KB and terminal controls must not mutate the run.
+			require.Error(t, repo.RequestRunControl(ctx, "other-kb", run.ID, control))
+			stored.Status = types.CodeWikiRunStatusPublished
+			require.NoError(t, repo.UpdateRun(ctx, stored))
+			require.Error(t, repo.RequestRunControl(ctx, "kb-1", run.ID, control))
+		})
+	}
+}
+
+func TestCodeWikiPageProgressPreservesIdentityAndCompletedCandidates(t *testing.T) {
+	db := newCodeWikiTestDB(t)
+	repo := NewCodeWikiRepository(db)
+	ctx := context.Background()
+	page := &types.CodeWikiRunPage{ID: "page-1", RunID: "run-1", PageKey: "overview",
+		Status: types.CodeWikiRunPageStatusPending, BaselineVersion: 7, Title: "Overview"}
+	require.NoError(t, repo.UpsertRunPage(ctx, page))
+	for _, step := range []string{"retrieving", "generating", "validating"} {
+		require.NoError(t, repo.UpdateRunPageProgress(ctx, "run-1", "overview", step))
+		pages, err := repo.ListRunPages(ctx, "run-1")
+		require.NoError(t, err)
+		require.Len(t, pages, 1)
+		require.Equal(t, "page-1", pages[0].ID)
+		require.Equal(t, 7, pages[0].BaselineVersion)
+		require.Equal(t, step, pages[0].ValidationStatus)
+	}
+	page.Status, page.ValidationStatus, page.Content = types.CodeWikiRunPageStatusStaged, "passed", "original bytes\n"
+	require.NoError(t, repo.UpsertRunPage(ctx, page))
+	require.NoError(t, repo.UpdateRunPageProgress(ctx, "run-1", "overview", "generating"))
+	pages, err := repo.ListRunPages(ctx, "run-1")
+	require.NoError(t, err)
+	require.Equal(t, "passed", pages[0].ValidationStatus)
+	require.Equal(t, "original bytes\n", pages[0].Content)
+	require.Error(t, repo.UpdateRunPageProgress(ctx, "run-1", "overview", "invented"))
 }
 
 func TestCodeWikiRepositoryBindingUnique(t *testing.T) {

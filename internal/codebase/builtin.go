@@ -64,7 +64,7 @@ func (p *BuiltinProvider) CheckCapabilities(ctx context.Context, _ *types.CodeWi
 	// Optional capabilities provided by the engine.
 	set(types.CodeWikiCapDirectory, true, "local", "", "filtered tree on disk")
 	set(types.CodeWikiCapSymbols, true, "provider", "search_code", "symbol-aware search")
-	set(types.CodeWikiCapCallGraph, true, "provider", "query_graph", "graph relations are candidates pending source verification")
+	set(types.CodeWikiCapCallGraph, version == BuiltinSupportedVersion, "provider", "query_graph", "snapshot-scoped CALLS candidates with both source endpoints; bounded results do not establish complete impact coverage")
 	set(types.CodeWikiCapCrossRepo, version == BuiltinSupportedVersion, "builtin", "index_repository",
 		"native cross-repo service linking; npm package dependencies and imports verified against both frozen snapshots")
 	set(types.CodeWikiCapCoverage, true, "provider", "index_status", versionNote)
@@ -185,11 +185,9 @@ func (p *BuiltinProvider) QuerySymbols(ctx context.Context, scope SnapshotScope,
 	return out, nil
 }
 
-// QueryRelations is served through graph queries in the first version; the
-// engine surface is verified in stage 0. Until then relations degrade to
-// search-based candidates.
+// QueryRelations returns direct call candidates from the owned frozen index.
 func (p *BuiltinProvider) QueryRelations(ctx context.Context, scope SnapshotScope, symbol string, opts QueryOptions) ([]RelationEdge, error) {
-	return nil, ErrUnsupported
+	return p.queryRelations(ctx, scope, symbol, opts)
 }
 
 // QueryCrossRepository links only the supplied frozen projects, then resolves
@@ -206,8 +204,8 @@ func (p *BuiltinProvider) ReportCoverage(ctx context.Context, scope SnapshotScop
 	}
 	return &CoverageReport{
 		EngineVersion: status.Version,
-		TotalFiles:    status.Nodes, // node/edge counts carry scope magnitude
-		IndexedFiles:  status.Nodes,
+		// index_status reports graph nodes, not parsed source-file counts.
+		// Unknown file coverage must remain unknown; do not claim full coverage.
 	}, nil
 }
 

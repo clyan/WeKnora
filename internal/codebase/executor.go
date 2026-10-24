@@ -134,7 +134,10 @@ func describeCmd(args []string) string {
 	if len(args) == 0 {
 		return "cli"
 	}
-	return "cli " + args[0]
+	if args[0] == "cli" && len(args) > 1 {
+		return "cli " + args[1]
+	}
+	return args[0]
 }
 
 func truncateTail(s string, n int) string {
@@ -262,6 +265,44 @@ func tableRow(columns []string, row []json.RawMessage) map[string]json.RawMessag
 		}
 	}
 	return cells
+}
+
+func (e *builtinExecutor) cliCallRelations(ctx context.Context, project, symbol string, limit, offset int) ([]map[string]json.RawMessage, error) {
+	where := ""
+	if symbol != "" {
+		// A JSON string literal also escapes Cypher quotes/backslashes. Values
+		// are never inserted as graph syntax or interpreted by a shell.
+		literal, _ := json.Marshal(symbol)
+		where = fmt.Sprintf(" WHERE a.qualified_name = %s OR b.qualified_name = %s OR a.name = %s OR b.name = %s", literal, literal, literal, literal)
+	}
+	query := fmt.Sprintf("MATCH (a)-[r:CALLS]->(b)%s RETURN type(r) AS kind, a.qualified_name AS from_symbol, a.file_path AS from_path, a.start_line AS from_line, a.end_line AS from_end, b.qualified_name AS to_symbol, b.file_path AS to_path, b.start_line AS to_line, b.end_line AS to_end ORDER BY from_path, from_line, from_symbol, to_path, to_line, to_symbol SKIP %d LIMIT %d", where, offset, limit)
+	var out struct {
+		Columns []string            `json:"columns"`
+		Rows    [][]json.RawMessage `json:"rows"`
+	}
+	if err := e.runJSON(ctx, builtinRunTimeout, &out, "cli", "query_graph", "--project", project, "--query", query, "--format", "json"); err != nil {
+		return nil, err
+	}
+	columns := make(map[string]bool)
+	for _, name := range out.Columns {
+		columns[name] = true
+	}
+	for _, name := range []string{"kind", "from_symbol", "from_path", "from_line", "from_end", "to_symbol", "to_path", "to_line", "to_end"} {
+		if !columns[name] {
+			return nil, fmt.Errorf("codebase: call graph missing column %s", name)
+		}
+	}
+	if len(out.Rows) > limit {
+		return nil, fmt.Errorf("codebase: call graph exceeded requested limit")
+	}
+	var rows []map[string]json.RawMessage
+	for _, row := range out.Rows {
+		if len(row) != len(out.Columns) {
+			return nil, fmt.Errorf("codebase: malformed call graph row")
+		}
+		rows = append(rows, tableRow(out.Columns, row))
+	}
+	return rows, nil
 }
 
 // cliLinkRepositories limits native linking to the caller's frozen snapshot set.

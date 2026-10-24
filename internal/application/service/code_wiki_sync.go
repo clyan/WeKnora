@@ -33,12 +33,12 @@ const (
 	// codeWikiDefaultDataRoot is the persistent volume suggested by the plan
 	// (docker-compose mounts /data/code-wiki). Local dev without /data uses
 	// <working-dir>/.local-data/code-wiki (created on demand).
-	codeWikiDefaultDataRoot  = "/data/code-wiki"
+	codeWikiDefaultDataRoot   = "/data/code-wiki"
 	codeWikiDevDataRootSuffix = ".local-data/code-wiki"
 
 	// Archive / unpack guards (env-tunable, MB / file counts).
-	codeWikiMaxArchiveMBDefault  = 2048  // 2 GiB compressed
-	codeWikiMaxUnpackedMBDefault = 6144  // 6 GiB unpacked
+	codeWikiMaxArchiveMBDefault  = 2048 // 2 GiB compressed
+	codeWikiMaxUnpackedMBDefault = 6144 // 6 GiB unpacked
 	codeWikiMaxFilesDefault      = 250000
 
 	codeWikiConnectTimeout = 15 * time.Second
@@ -380,6 +380,7 @@ func (s *codeWikiService) finalizeCodeWikiSyncLog(ctx context.Context, syncLogID
 		logger.Warnf(ctx, "code wiki sync: finalize sync log %s failed: %v", syncLogID, err)
 	}
 }
+
 // ProcessCodeWikiSync is the asynq handler backing TypeCodeWikiSync: it
 // syncs the payload's bindings (or all enabled bindings), preparing one
 // snapshot + analysis artifact per repository, and finalizes the linked
@@ -415,6 +416,7 @@ func (s *codeWikiService) ProcessCodeWikiSync(ctx context.Context, task *asynq.T
 	// repositories stops the whole run with a clear error.
 	provider, err := s.registry.Resolve(ctx, profile)
 	if err != nil {
+		err = fmt.Errorf("initialize code analysis service (check the knowledge base's analysis service configuration): %w", err)
 		markCodeWikiSyncError(ctx, s.repo, bindings, selected, err)
 		s.finalizeCodeWikiSyncLog(ctx, payload.SyncLogID, len(selected))
 		return nil
@@ -475,17 +477,20 @@ func (s *codeWikiService) syncOneRepository(
 	_ = s.repo.UpdateRepositoryStatus(ctx, binding)
 
 	ds, err := s.dsService.GetDataSource(ctx, binding.SourceID)
-	if err != nil || ds == nil || ds.KnowledgeBaseID != kb.ID {
-		return fmt.Errorf("data source %s is no longer available for this knowledge base", binding.SourceID)
+	if err != nil {
+		return fmt.Errorf("load GitLab connection %s: %w", binding.SourceID, err)
+	}
+	if ds == nil || ds.KnowledgeBaseID != kb.ID {
+		return fmt.Errorf("load GitLab connection: data source %s is no longer available for this knowledge base; select an available connection in repository settings", binding.SourceID)
 	}
 	client, err := s.gitLabClientFor(ctx, ds)
 	if err != nil {
-		return err
+		return fmt.Errorf("initialize GitLab connection (check the server address and credentials): %w", err)
 	}
 	// Step 1: resolve ref → commit SHA. Everything downstream uses the SHA.
 	commitSHA, err := client.ResolveCommitSHA(ctx, binding.ProjectID, binding.Ref)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve repository commit (project=%s, ref=%q; check repository access and whether the branch/tag exists): %w", binding.ProjectID, binding.Ref, err)
 	}
 	filterHash := codeWikiFilterHash(binding.IncludePaths, binding.ExcludePatterns)
 
@@ -501,7 +506,7 @@ func (s *codeWikiService) syncOneRepository(
 	if !snapshotReady {
 		snapshot, err = s.downloadSnapshot(ctx, kb, binding, client, commitSHA, filterHash)
 		if err != nil {
-			return err
+			return fmt.Errorf("prepare code snapshot (commit=%s): %w", shortSHA(commitSHA), err)
 		}
 	}
 
@@ -520,14 +525,18 @@ func (s *codeWikiService) syncOneRepository(
 			LocalPath:       snapshot.LocalPath,
 		}
 		result, prepErr := provider.PrepareArtifact(ctx, scope)
+		if prepErr == nil && (result == nil || !result.Ready) {
+			prepErr = codebase.ErrArtifactNotReady
+		}
 		engineVersion := ""
 		if result != nil {
 			engineVersion = result.EngineVersion
 		}
 		if prepErr != nil {
+			prepErr = fmt.Errorf("prepare code index (commit=%s; code snapshot is available, but indexing did not complete; check the analysis service and retry sync): %w", shortSHA(commitSHA), prepErr)
 			_ = s.recordArtifact(ctx, kb, binding, snapshot, profile,
 				types.CodeWikiArtifactStatusFailed, engineVersion, "", nil, prepErr)
-			return fmt.Errorf("prepare analysis artifact: %w", prepErr)
+			return prepErr
 		}
 		artifact = s.recordArtifact(ctx, kb, binding, snapshot, profile,
 			types.CodeWikiArtifactStatusReady, result.EngineVersion, result.Handle, result.Coverage, nil)
@@ -541,7 +550,7 @@ func (s *codeWikiService) syncOneRepository(
 	binding.LastSyncAt = &now
 	binding.ErrorMessage = ""
 	if err := s.repo.UpdateRepositoryStatus(ctx, binding); err != nil {
-		return err
+		return fmt.Errorf("save sync result (commit=%s; code snapshot and index are ready, but repository status could not be saved): %w", shortSHA(commitSHA), err)
 	}
 	logger.Infof(ctx, "code wiki sync: repository %s ready at %s (snapshot=%s artifact=%s)",
 		binding.DisplayName, shortSHA(commitSHA), snapshot.ID, artifact.ID)
@@ -607,7 +616,7 @@ func (s *codeWikiService) downloadSnapshot(
 
 	body, _, err := client.DownloadArchive(dlCtx, binding.ProjectID, commitSHA)
 	if err != nil {
-		return nil, fmt.Errorf("download archive: %w", err)
+		return nil, fmt.Errorf("download repository archive (check GitLab connectivity and repository read permissions): %w", err)
 	}
 	defer body.Close()
 	// Bound compressed bytes regardless of any server-reported length.
@@ -615,7 +624,7 @@ func (s *codeWikiService) downloadSnapshot(
 
 	root, err := ensureCodeWikiRoot()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("prepare snapshot storage (check disk space and directory write permissions): %w", err)
 	}
 	staging, err := os.MkdirTemp(root, ".staging-")
 	if err != nil {
@@ -625,13 +634,13 @@ func (s *codeWikiService) downloadSnapshot(
 
 	fileCount, totalBytes, err := unpackCodeWikiArchive(limited, staging, binding.IncludePaths, binding.ExcludePatterns)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("extract and filter repository archive: %w", err)
 	}
 
 	snapshotID := uuid.NewString()
 	finalDir := filepath.Join(root, snapshotRelPath(kb.TenantID, kb.ID, snapshotID))
 	if err := os.MkdirAll(filepath.Dir(finalDir), 0o755); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create snapshot directory (check disk space and write permissions): %w", err)
 	}
 	if err := os.Rename(staging, finalDir); err != nil {
 		return nil, fmt.Errorf("land snapshot directory: %w", err)
@@ -654,7 +663,7 @@ func (s *codeWikiService) downloadSnapshot(
 		if existing, gErr := s.repo.FindReusableSnapshot(ctx, binding.ID, commitSHA, filterHash); gErr == nil && existing != nil {
 			return existing, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("save code snapshot record: %w", err)
 	}
 	logger.Infof(ctx, "code wiki sync: snapshot %s landed (%d files, %d bytes) for %s@%s",
 		snapshot.ID, fileCount, totalBytes, binding.DisplayName, shortSHA(commitSHA))

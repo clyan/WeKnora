@@ -65,3 +65,29 @@ func TestUnpackCodeWikiArchiveRejectsDeviceEntries(t *testing.T) {
 	_, _, err := unpackCodeWikiArchive(bytes.NewReader(archive), dst, nil, nil)
 	require.ErrorContains(t, err, "only regular files are allowed")
 }
+
+// A GitLab commit archive contains tracked files. A later .gitignore rule
+// does not untrack them, so sync must not reinterpret it as a source filter.
+func TestUnpackCodeWikiArchiveKeepsCommittedFilesMatchingGitignore(t *testing.T) {
+	rules := "main.go\nsrc/committed.ts\n"
+	archive := buildGitLabStyleArchive(t, func(tw *tar.Writer) {
+		for _, file := range [][2]string{{".gitignore", rules}, {"src/committed.ts", "committed source"}} {
+			require.NoError(t, tw.WriteHeader(&tar.Header{Name: "proj-abc123/" + file[0], Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(file[1]))}))
+			_, err := tw.Write([]byte(file[1]))
+			require.NoError(t, err)
+		}
+	})
+	dst := t.TempDir()
+	count, size, err := unpackCodeWikiArchive(bytes.NewReader(archive), dst, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, 3, count)
+	require.EqualValues(t, 4+len(rules)+len("committed source"), size)
+	require.FileExists(t, filepath.Join(dst, "main.go"))
+	require.FileExists(t, filepath.Join(dst, "src/committed.ts"))
+	// Explicit Code Wiki filters still define the selected documentation scope.
+	dst = t.TempDir()
+	count, _, err = unpackCodeWikiArchive(bytes.NewReader(archive), dst, nil, []string{"src/"})
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+	require.NoFileExists(t, filepath.Join(dst, "src/committed.ts"))
+}

@@ -91,6 +91,7 @@ const validTabs = ['documents', 'wiki', 'graph', 'codewiki'] as const
 type KbTab = typeof validTabs[number]
 const initTab = validTabs.includes(route.query.tab as any) ? (route.query.tab as KbTab) : 'documents'
 const activeKbTab = ref<KbTab>(initTab);
+const codeWikiPublishedRevision = ref(0)
 // Code wiki KBs have no document pipeline: land on the wiki view unless a
 // valid tab was requested (plan §6.2: Code Wiki 默认展示 Wiki).
 watch(isCodeWiki, (codeWiki) => {
@@ -119,6 +120,10 @@ const onViewWikiInGraph = async (slug: string) => {
   // (which spreads route.query) preserves slug instead of clobbering it.
   await router.replace({ query: { ...route.query, tab: 'graph', slug } })
   activeKbTab.value = 'graph'
+}
+const onOpenCodeWikiPage = async (slug: string) => {
+  await router.replace({ query: { ...route.query, tab: 'wiki', slug } })
+  activeKbTab.value = 'wiki'
 }
 
 let wikiStatusTimer: ReturnType<typeof setInterval> | null = null
@@ -2385,17 +2390,17 @@ async function createNewSession(value: string): Promise<void> {
         </div>
       </div>
 
-      <!-- Wiki Browser / Graph (shown when wiki or graph tab is active) -->
-      <div v-if="isWiki && (activeKbTab === 'wiki' || activeKbTab === 'graph')" class="wiki-main-area">
-        <WikiBrowser v-if="kbId" :knowledge-base-id="kbId" :view="activeKbTab === 'graph' ? 'graph' : 'browser'"
-          :can-edit="canEdit" @open-source-doc="openSourceDoc" @status-change="onWikiStatusChange"
-          @view-graph="onViewWikiInGraph" />
+      <!-- Keep task observation mounted across all three code-wiki tabs. -->
+      <div v-if="isCodeWiki && kbId" :class="{ 'wiki-main-area wiki-main-area--codewiki': activeKbTab === 'codewiki' }">
+        <CodeWikiPanel :key="kbId" :knowledge-base-id="kbId" :can-edit="canEdit" :show-sources="activeKbTab === 'codewiki'"
+          @open-kb-settings="handleOpenKBSettings" @published="codeWikiPublishedRevision++" @open-wiki-page="onOpenCodeWikiPage" />
       </div>
 
-      <!-- Code wiki repositories / provider / runs management -->
-      <div v-if="isCodeWiki && activeKbTab === 'codewiki'" class="wiki-main-area wiki-main-area--codewiki">
-        <CodeWikiPanel v-if="kbId" :knowledge-base-id="kbId" :can-edit="canEdit"
-          @open-kb-settings="handleOpenKBSettings" />
+      <!-- Wiki Browser / Graph (shown when wiki or graph tab is active) -->
+      <div v-if="isWiki && (activeKbTab === 'wiki' || activeKbTab === 'graph')" class="wiki-main-area">
+        <WikiBrowser v-if="kbId" :key="`${kbId}:${codeWikiPublishedRevision}`" :knowledge-base-id="kbId" :view="activeKbTab === 'graph' ? 'graph' : 'browser'"
+          :can-edit="canEdit" @open-source-doc="openSourceDoc" @status-change="onWikiStatusChange"
+          @view-graph="onViewWikiInGraph" />
       </div>
 
       <template v-if="(activeKbTab === 'documents' && !isCodeWiki) || !isWiki">

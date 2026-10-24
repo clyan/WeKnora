@@ -277,6 +277,8 @@ func RegisterCodeWikiRoutes(r *gin.RouterGroup, codeWikiHandler *handler.CodeWik
 
 		// Repository bindings.
 		cw.GET("/repositories", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListRepositories)
+		cw.GET("/repositories/:id/files", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListSourceDirectory)
+		cw.GET("/repositories/:id/source-pages", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListSourcePages)
 		cw.POST("/repositories", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.CreateRepository)
 		cw.PATCH("/repositories/:id", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.UpdateRepository)
 		cw.DELETE("/repositories/:id", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.DeleteRepository)
@@ -286,6 +288,8 @@ func RegisterCodeWikiRoutes(r *gin.RouterGroup, codeWikiHandler *handler.CodeWik
 		cw.GET("/runs", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListRuns)
 		cw.POST("/runs", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.CreateRun)
 		cw.GET("/runs/:id", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.GetRun)
+		cw.GET("/runs/:id/events", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListRunEvents)
+		cw.POST("/runs/:id/impact-review", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.ApproveRunImpact)
 		cw.POST("/runs/:id/cancel", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.CancelRun)
 		cw.POST("/runs/:id/pause", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.PauseRun)
 		cw.POST("/runs/:id/resume", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.ResumeRun)

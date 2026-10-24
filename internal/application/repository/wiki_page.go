@@ -288,6 +288,9 @@ func (r *wikiPageRepository) GetByID(ctx context.Context, id string) (*types.Wik
 		}
 		return nil, err
 	}
+	if err := r.hydrateCodeWikiInLinks(ctx, &page); err != nil {
+		return nil, err
+	}
 	return &page, nil
 }
 
@@ -302,7 +305,39 @@ func (r *wikiPageRepository) GetBySlug(ctx context.Context, kbID string, slug st
 		}
 		return nil, err
 	}
+	if err := r.hydrateCodeWikiInLinks(ctx, &page); err != nil {
+		return nil, err
+	}
 	return &page, nil
+}
+
+func isCodeWikiRow(page *types.WikiPage) bool {
+	var metadata map[string]interface{}
+	return json.Unmarshal(page.PageMetadata, &metadata) == nil && metadata["code_wiki_run_id"] != nil
+}
+
+// Incoming links are a read projection for Code Wiki. Updating a source page
+// must not rewrite the timestamps/metadata of its otherwise unaffected targets.
+func (r *wikiPageRepository) hydrateCodeWikiInLinks(ctx context.Context, page *types.WikiPage) error {
+	if !isCodeWikiRow(page) {
+		return nil
+	}
+	var links []*types.WikiPage
+	if err := r.db.WithContext(ctx).Select("slug", "out_links").
+		Where("knowledge_base_id = ? AND status <> ?", page.KnowledgeBaseID, types.WikiPageStatusArchived).
+		Order("slug ASC").Find(&links).Error; err != nil {
+		return err
+	}
+	page.InLinks = types.StringArray{}
+	for _, source := range links {
+		for _, target := range source.OutLinks {
+			if target == page.Slug {
+				page.InLinks = append(page.InLinks, source.Slug)
+				break
+			}
+		}
+	}
+	return nil
 }
 
 // List retrieves wiki pages with filtering and pagination
@@ -1160,6 +1195,21 @@ func (r *wikiPageRepository) ListAll(ctx context.Context, kbID string) ([]*types
 		Order("page_type ASC, title ASC").
 		Find(&pages).Error; err != nil {
 		return nil, err
+	}
+	incoming := make(map[string]types.StringArray, len(pages))
+	for _, source := range pages {
+		seen := make(map[string]bool, len(source.OutLinks))
+		for _, target := range source.OutLinks {
+			if !seen[target] {
+				incoming[target] = append(incoming[target], source.Slug)
+				seen[target] = true
+			}
+		}
+	}
+	for _, page := range pages {
+		if isCodeWikiRow(page) {
+			page.InLinks = append(types.StringArray{}, incoming[page.Slug]...)
+		}
 	}
 	return pages, nil
 }

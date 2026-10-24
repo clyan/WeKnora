@@ -1,6 +1,6 @@
 <template>
   <t-dialog v-model:visible="dialogVisible" :header="$t('codeWiki.providerDialog.title')" :footer="false"
-    width="560px" destroy-on-close>
+    width="min(560px, 100vw)" :z-index="2700" destroy-on-close>
     <div class="provider-form">
       <div class="form-item">
         <label class="form-label required">{{ $t('codeWiki.providerDialog.kind') }}</label>

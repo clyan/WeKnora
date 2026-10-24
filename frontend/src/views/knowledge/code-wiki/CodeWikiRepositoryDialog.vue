@@ -1,22 +1,22 @@
 <template>
-  <t-dialog v-model:visible="dialogVisible" :header="$t('codeWiki.repoDialog.title')" :footer="false" width="560px"
-    destroy-on-close>
+  <t-dialog v-model:visible="dialogVisible" :header="editing ? $t('codeWiki.workspace.editRepository') : $t('codeWiki.repoDialog.title')" :footer="false" width="min(560px, 100vw)"
+    :z-index="2700" destroy-on-close>
     <div class="repo-form">
       <!-- GitLab 数据源（连接）：code_wiki KB 的连接在设置里配置 -->
       <div class="form-item">
         <label class="form-label required">{{ $t('codeWiki.repoDialog.source') }}</label>
-        <t-select v-model="form.sourceId" :placeholder="$t('codeWiki.repoDialog.sourcePlaceholder')" clearable>
+        <t-select v-model="form.sourceId" :disabled="!!editing" :placeholder="$t('codeWiki.repoDialog.sourcePlaceholder')" clearable>
           <t-option v-for="ds in dataSources" :key="ds.id" :value="ds.id" :label="ds.name" />
         </t-select>
         <p v-if="!dataSources.length" class="form-tip">
           {{ $t('codeWiki.repoDialog.noSource') }}
-          <a class="form-tip-link" @click="$emit('open-kb-settings')">{{ $t('codeWiki.repoDialog.goSettings') }}</a>
+          <button type="button" class="form-tip-link" @click="$emit('open-kb-settings')">{{ $t('codeWiki.repoDialog.goSettings') }}</button>
         </p>
       </div>
 
       <div class="form-item">
         <label class="form-label required">{{ $t('codeWiki.repoDialog.project') }}</label>
-        <t-input v-model="form.projectId" :placeholder="$t('codeWiki.repoDialog.projectPlaceholder')" />
+        <t-input v-model="form.projectId" :disabled="!!editing" :placeholder="$t('codeWiki.repoDialog.projectPlaceholder')" />
         <p class="form-tip">{{ $t('codeWiki.repoDialog.projectTip') }}</p>
       </div>
 
@@ -37,6 +37,7 @@
         </div>
       </div>
 
+      <p v-if="editing" class="form-tip">{{ $t('codeWiki.workspace.branchEditHint') }}</p>
       <div class="form-item">
         <label class="form-label">{{ $t('codeWiki.repoDialog.includePaths') }}</label>
         <t-textarea v-model="form.includePaths" :placeholder="$t('codeWiki.repoDialog.includePathsPlaceholder')"
@@ -63,12 +64,13 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { MessagePlugin } from 'tdesign-vue-next'
-import { createCodeWikiRepository } from '@/api/code-wiki'
+import { createCodeWikiRepository, updateCodeWikiRepository, type CodeWikiRepositoryBinding } from '@/api/code-wiki'
 
 const props = defineProps<{
   visible: boolean
   knowledgeBaseId: string
   dataSources: any[]
+  editing?: CodeWikiRepositoryBinding | null
 }>()
 
 const emit = defineEmits<{
@@ -96,12 +98,12 @@ const form = reactive({
 
 watch(dialogVisible, (visible) => {
   if (visible) {
-    form.sourceId = props.dataSources[0]?.id ?? ''
-    form.projectId = ''
-    form.role = 'backend'
-    form.ref = ''
-    form.includePaths = ''
-    form.excludePatterns = ''
+    form.sourceId = props.editing?.source_id ?? props.dataSources[0]?.id ?? ''
+    form.projectId = props.editing?.project_id ?? ''
+    form.role = props.editing?.role ?? 'backend'
+    form.ref = props.editing?.ref ?? ''
+    form.includePaths = props.editing?.include_paths?.join('\n') ?? ''
+    form.excludePatterns = props.editing?.exclude_patterns?.join('\n') ?? ''
   }
 })
 
@@ -112,17 +114,24 @@ const parseList = (raw: string): string[] =>
   raw.split(/[,\n]/).map((s) => s.trim()).filter(Boolean)
 
 const submit = async () => {
+  if (submitting.value || !canSubmit.value) return
   submitting.value = true
   try {
-    await createCodeWikiRepository(props.knowledgeBaseId, {
+    const payload = {
       source_id: form.sourceId,
       project_id: form.projectId.trim(),
       role: form.role,
       ref: form.ref.trim(),
       include_paths: parseList(form.includePaths),
       exclude_patterns: parseList(form.excludePatterns),
-    })
-    MessagePlugin.success(t('codeWiki.repoDialog.created'))
+      ...(props.editing ? { display_name: props.editing.display_name, enabled: props.editing.enabled } : {}),
+    }
+    if (props.editing) {
+      await updateCodeWikiRepository(props.knowledgeBaseId, props.editing.id, payload)
+    } else {
+      await createCodeWikiRepository(props.knowledgeBaseId, payload)
+    }
+    MessagePlugin.success(t(props.editing ? 'common.saveSuccess' : 'codeWiki.repoDialog.created'))
     emit('created')
   } catch (err: any) {
     MessagePlugin.error(err?.message ?? t('codeWiki.loadFailed'))
@@ -168,6 +177,9 @@ const submit = async () => {
 }
 
 .form-tip-link {
+  border: 0;
+  background: none;
+  padding: 0;
   color: var(--td-brand-color);
   cursor: pointer;
 }

@@ -2,12 +2,12 @@
   <teleport to="body">
     <div v-if="drawerVisible && resizable" class="setting-drawer-resize-handle"
       :class="{ 'setting-drawer-resize-handle--active': drawerResizing }"
-      :style="{ right: `${drawerWidthPx}px`, '--setting-drawer-travel': `${drawerWidthPx}px` }"
+      :style="{ right: `${drawerWidthPx}px`, '--setting-drawer-travel': `${drawerWidthPx}px`, zIndex: effectiveZIndex + 1 }"
       role="separator" aria-orientation="vertical" @mousedown.prevent="onResizeStart">
       <div class="setting-drawer-resize-line" />
     </div>
   </teleport>
-  <t-drawer v-model:visible="drawerVisible" v-bind="drawerPassthroughAttrs" :size="effectiveWidth" :z-index="zIndex" placement="right"
+  <t-drawer v-model:visible="drawerVisible" v-bind="drawerPassthroughAttrs" :size="effectiveWidth" :z-index="effectiveZIndex" placement="right"
     attach="body" destroy-on-close :footer="!hideFooter"
     :class="drawerClass" @before-close="blurActiveElementBeforeClose">
     <!--
@@ -63,15 +63,16 @@
 </template>
 
 <script lang="ts">
-import type { InjectionKey } from 'vue'
+import type { ComputedRef, InjectionKey } from 'vue'
 
 // Skill manage (and similar) panels teleport compact header actions here so
 // they sit on the title row without each drawer re-declaring the chrome.
 export const SETTING_DRAWER_HEADER_ACTIONS_ID: InjectionKey<string> = Symbol('settingDrawerHeaderActionsId')
+const SETTING_DRAWER_Z_INDEX: InjectionKey<ComputedRef<number>> = Symbol('settingDrawerZIndex')
 </script>
 
 <script setup lang="ts">
-import { ref, computed, provide, useAttrs, useId, onMounted, onUnmounted } from 'vue'
+import { ref, computed, inject, provide, useAttrs, useId, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 interface Props {
@@ -133,6 +134,10 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const attrs = useAttrs()
+// Nested editors must sit above their parent drawer, including its resize handle.
+const parentZIndex = inject(SETTING_DRAWER_Z_INDEX, undefined)
+const effectiveZIndex = computed(() => Math.max(props.zIndex, (parentZIndex?.value ?? 0) + 100))
+provide(SETTING_DRAWER_Z_INDEX, effectiveZIndex)
 const headerActionsId = `sdha${useId().replace(/\W/g, '')}`
 provide(SETTING_DRAWER_HEADER_ACTIONS_ID, `#${headerActionsId}`)
 
@@ -504,7 +509,6 @@ const handleCancel = () => {
   width: 12px;
   margin-left: -6px;
   cursor: col-resize;
-  z-index: 2501;
   display: flex;
   align-items: center;
   justify-content: center;

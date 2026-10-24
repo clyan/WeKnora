@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -205,7 +207,11 @@ func (h *CodeWikiHandler) CreateRun(c *gin.Context) {
 		respondCodeWikiError(c, err)
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"success": true, "data": run})
+	status := http.StatusAccepted
+	if run.NoChanges {
+		status = http.StatusOK
+	}
+	c.JSON(status, gin.H{"success": true, "data": run})
 }
 
 // GetRun handles GET /knowledgebase/:kb_id/code-wiki/runs/:id, including
@@ -221,11 +227,96 @@ func (h *CodeWikiHandler) GetRun(c *gin.Context) {
 		respondCodeWikiError(c, err)
 		return
 	}
+	events, err := h.service.ListRunEvents(ctx, kbID, run.ID, 0)
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	var frozen struct {
+		SourceChanges []types.CodeWikiSourceChange    `json:"source_changes"`
+		Guard         *types.CodeWikiPublicationGuard `json:"publication_guard"`
+	}
+	_ = json.Unmarshal(run.ConfigSnapshot, &frozen)
+	baselineRunID := ""
+	if frozen.Guard != nil {
+		baselineRunID = frozen.Guard.BaselineRunID
+	}
+	var heartbeatAt *time.Time
+	if run.LeaseExpiresAt != nil {
+		at := run.LeaseExpiresAt.Add(-time.Duration(types.CodeWikiRunLeaseTTLSeconds) * time.Second)
+		heartbeatAt = &at
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
-		"run":       run,
-		"manifest":  manifest,
-		"pages":     pages,
+		"run":                 run,
+		"manifest":            manifest,
+		"pages":               pages,
+		"events":              events,
+		"source_changes":      frozen.SourceChanges,
+		"baseline_run_id":     baselineRunID,
+		"worker_heartbeat_at": heartbeatAt,
+		"impact_plan":         frozen.Guard,
 	}})
+}
+
+func (h *CodeWikiHandler) ApproveRunImpact(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	var req types.CodeWikiImpactReviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	if err := h.service.ApproveRunImpact(c.Request.Context(), kbID, c.Param("id"), &req); err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"success": true})
+}
+
+func (h *CodeWikiHandler) ListRunEvents(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	before, err := strconv.ParseInt(c.DefaultQuery("before", "0"), 10, 64)
+	if err != nil || before < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid event cursor"})
+		return
+	}
+	events, err := h.service.ListRunEvents(c.Request.Context(), kbID, c.Param("id"), before)
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": events})
+}
+
+func (h *CodeWikiHandler) ListSourceDirectory(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	directory, err := h.service.ListSourceDirectory(c.Request.Context(), kbID, c.Param("id"), c.Query("snapshot_id"), c.Query("prefix"), c.Query("after"))
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": directory})
+}
+
+func (h *CodeWikiHandler) ListSourcePages(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	pages, err := h.service.ListSourcePages(c.Request.Context(), kbID, c.Param("id"), c.Query("snapshot_id"), c.Query("path"), c.Query("after"))
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": pages})
 }
 
 // CancelRun handles POST /knowledgebase/:kb_id/code-wiki/runs/:id/cancel.

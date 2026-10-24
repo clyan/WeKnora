@@ -52,6 +52,7 @@ func TestBuiltinCapabilitiesVersion(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, report.Connected)
 			require.Equal(t, version == BuiltinSupportedVersion, report.HasCapability(types.CodeWikiCapCrossRepo))
+			require.Equal(t, version == BuiltinSupportedVersion, report.HasCapability(types.CodeWikiCapCallGraph))
 			if version == BuiltinSupportedVersion {
 				require.Empty(t, report.Notes)
 			} else {

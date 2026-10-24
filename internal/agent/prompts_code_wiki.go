@@ -103,6 +103,16 @@ const CodeWikiDefaultToc = `- 项目概览 (overview): 项目说明、仓库清�
 - 开发运维 (devops): 启动步骤、配置说明、构建和部署（仅描述有证据的内容）
 - 分析说明 (analysis): 快照清单、覆盖范围、未确认关联`
 
+// CodeWikiDefaultTocV1 defines category names for new projects. Existing
+// published projects retain their frozen directory version until migrated.
+const CodeWikiDefaultTocV1 = `- 项目概览 (overview): 项目介绍与能力地图、仓库清单与阅读导航
+- 系统架构 (architecture): 系统组成、请求链路、服务边界、存储、认证与权限
+- 仓库文档 (repository): 按实际接入仓库分别说明项目结构、入口、模块、接口和配置；依赖库仅在提供源码时出现
+- 接口与跨端契约 (interaction): 接口对照、认证、错误码、未匹配接口与兼容性问题
+- 功能链路 (workflow): 从真实页面/路由/操作或 API、任务、消息、CLI 入口追踪实现，关联代码证据
+- 开发与联调 (devops): 环境、启动、配置、代理、联调和部署，仅描述已有依据的内容
+- 分析范围与版本 (analysis): 仓库与代码版本、过滤规则、覆盖与限制、文档更新记录`
+
 // CodeWikiEvidenceLine renders one evidence entry for the prompt's
 // <evidence> block.
 const CodeWikiEvidenceLine = "[%s] %s:%d-%d (%s@%s) — %s"

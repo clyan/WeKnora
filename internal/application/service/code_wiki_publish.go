@@ -37,6 +37,24 @@ var codeWikiCategoryFolder = map[string][]string{
 	types.CodeWikiPageCategoryAnalysis:     {"分析说明"},
 }
 
+func codeWikiFoldersForRun(run *types.CodeWikiRun) (map[string][]string, error) {
+	var cfg codeWikiRunConfig
+	if err := json.Unmarshal(run.ConfigSnapshot, &cfg); err != nil {
+		return nil, fmt.Errorf("invalid frozen generation config: %w", err)
+	}
+	if cfg.DirectoryVersion == 0 {
+		return codeWikiCategoryFolder, nil
+	}
+	if cfg.DirectoryVersion != types.CodeWikiDirectoryVersionV1 {
+		return nil, fmt.Errorf("unsupported directory version %d", cfg.DirectoryVersion)
+	}
+	folders := make(map[string][]string, 7)
+	for _, category := range types.CodeWikiDirectoryCategories() {
+		folders[category.Category] = []string{category.Title}
+	}
+	return folders, nil
+}
+
 // PublishRun executes the atomic batch publish.
 func (s *codeWikiService) PublishRun(ctx context.Context, kbID, runID string, req *types.CodeWikiRunPublishRequest) (*types.CodeWikiRun, error) {
 	kb, err := s.requireCodeWikiKB(ctx, kbID)
@@ -50,6 +68,23 @@ func (s *codeWikiService) PublishRun(ctx context.Context, kbID, runID string, re
 	if run.Status != types.CodeWikiRunStatusStaged {
 		return nil, apperrors.NewBadRequestError("run is not staged; only staged runs can be published")
 	}
+	var inputConfig codeWikiRunConfig
+	if err := json.Unmarshal(run.ConfigSnapshot, &inputConfig); err != nil {
+		return nil, err
+	}
+	if len(inputConfig.SnapshotReferences) > 0 {
+		entries, err := s.repo.ListRunRepositories(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.verifyCodeWikiSnapshotReferences(ctx, kbID, entries, inputConfig.SnapshotReferences); err != nil {
+			return nil, err
+		}
+	}
+	folders, err := codeWikiFoldersForRun(run)
+	if err != nil {
+		return nil, apperrors.NewBadRequestError(err.Error())
+	}
 	resolve := strings.TrimSpace(req.ResolveConflicts)
 	if resolve == "" {
 		resolve = types.CodeWikiConflictAbort
@@ -62,24 +97,32 @@ func (s *codeWikiService) PublishRun(ctx context.Context, kbID, runID string, re
 	if err != nil {
 		return nil, err
 	}
+	if err := validateCodeWikiPublishCompleteness(run, pages); err != nil {
+		return nil, apperrors.NewBadRequestError(err.Error())
+	}
 	publishable := make([]*types.CodeWikiRunPage, 0, len(pages))
-	var failedPages []*types.CodeWikiRunPage
 	for _, page := range pages {
-		if page.GenerationError != "" {
-			failedPages = append(failedPages, page)
-			continue
-		}
-		if page.Status == types.CodeWikiRunPageStatusStaged {
+		if page.Status == types.CodeWikiRunPageStatusStaged || page.Status == types.CodeWikiRunPageStatusConflict {
+			page.Status = types.CodeWikiRunPageStatusStaged
 			publishable = append(publishable, page)
 		}
 	}
 	if len(publishable) == 0 {
-		return nil, apperrors.NewBadRequestError("run has no publishable pages")
+		var cfg codeWikiRunConfig
+		_ = json.Unmarshal(run.ConfigSnapshot, &cfg)
+		if cfg.PublicationGuard == nil || !cfg.PublicationGuard.ReviewApproved {
+			return nil, apperrors.NewBadRequestError("run has no publishable pages")
+		}
+		for _, page := range pages {
+			if page.Status != types.CodeWikiRunPageStatusPreserved {
+				return nil, apperrors.NewBadRequestError("run has unresolved pages")
+			}
+		}
 	}
 	// With resolve=keep, pages whose live version is human-authored since
 	// the baseline are pre-marked skipped so the transaction never sees
 	// them as conflicts.
-	if resolve == types.CodeWikiConflictKeep {
+	if resolve == types.CodeWikiConflictKeep && len(publishable) > 0 {
 		for _, page := range publishable {
 			live, lErr := s.wikiService.GetPageBySlug(ctx, kbID, page.PageKey)
 			if lErr != nil {
@@ -88,9 +131,6 @@ func (s *codeWikiService) PublishRun(ctx context.Context, kbID, runID string, re
 			if live != nil && live.Version != page.BaselineVersion &&
 				live.LastEditSource == types.WikiEditSourceUser {
 				page.Status = types.CodeWikiRunPageStatusSkipped
-				if err := s.repo.UpdateRunPageStatus(ctx, page); err != nil {
-					return nil, err
-				}
 			}
 		}
 		refreshed := make([]*types.CodeWikiRunPage, 0, len(publishable))
@@ -105,17 +145,9 @@ func (s *codeWikiService) PublishRun(ctx context.Context, kbID, runID string, re
 		}
 	}
 
-	// Resolve target folders BEFORE the transaction — folder creation runs
-	// in its own transaction at the service layer and must not nest.
-	folderIDByCategory := make(map[string]string, len(codeWikiCategoryFolder))
-	for category, path := range codeWikiCategoryFolder {
-		folderID, _, fErr := s.wikiService.FindOrCreateFolderPath(ctx, kbID, kb.TenantID, path)
-		if fErr != nil {
-			logger.Warnf(ctx, "code wiki publish: folder for %s: %v", category, fErr)
-			continue
-		}
-		folderIDByCategory[category] = folderID
-	}
+	// Resolve folders inside the publication transaction, after all guards.
+	// A failed page/citation must not leave an orphaned directory behind.
+	folderIDByCategory := make(map[string]string, len(folders))
 
 	// Evidence specs per page key.
 	evidenceByPage := make(map[string][]*types.CodeWikiEvidenceSpec, len(publishable))
@@ -125,9 +157,31 @@ func (s *codeWikiService) PublishRun(ctx context.Context, kbID, runID string, re
 	}
 
 	applyPage := func(tx interfaces.TX, candidate *types.CodeWikiRunPage, live *types.WikiPage) (*types.WikiPage, *types.WikiPageRevision, error) {
+		if live == nil {
+			if len(folderIDByCategory) == 0 {
+				for order, entry := range types.CodeWikiDirectoryCategories() {
+					id, err := tx.EnsureWikiFolderPath(kbID, kb.TenantID, folders[entry.Category], order)
+					if err != nil {
+						return nil, nil, err
+					}
+					folderIDByCategory[entry.Category] = id
+				}
+			}
+			path, err := codeWikiCandidatePath(run, candidate)
+			if err != nil {
+				return nil, nil, err
+			}
+			id, err := tx.EnsureWikiFolderPath(kbID, kb.TenantID, path, candidate.SortOrder)
+			if err != nil {
+				return nil, nil, err
+			}
+			folderIDByCategory[candidate.PageKey] = id
+		}
 		return buildPublishedWikiPage(kb, run, candidate, live, folderIDByCategory)
 	}
-	conflicts, err := s.repo.PublishRun(ctx, run, publishable, evidenceByPage, applyPage)
+	// Include explicit skips so their preservation can be checked and saved
+	// atomically with the publication, rather than written ahead of it.
+	conflicts, err := s.repo.PublishRun(ctx, run, pages, evidenceByPage, applyPage)
 	if err != nil {
 		if err == types.ErrCodeWikiPublishConflict {
 			return run, apperrors.NewBadRequestError(fmt.Sprintf(
@@ -137,21 +191,72 @@ func (s *codeWikiService) PublishRun(ctx context.Context, kbID, runID string, re
 		return nil, err
 	}
 
-	// Best-effort link maintenance AFTER the transaction commits — the
-	// published rows are already consistent; backlinks/index are derived.
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := s.wikiService.RebuildLinks(bgCtx, kbID); err != nil {
-			logger.Warnf(bgCtx, "code wiki publish: rebuild links failed (non-fatal): %v", err)
-		}
-	}()
+	// Legacy publishing retains its existing maintenance. Guarded runs may
+	// not run this whole-library rewrite: it touches every row and timestamp.
+	var frozen codeWikiRunConfig
+	_ = json.Unmarshal(run.ConfigSnapshot, &frozen)
+	if frozen.PublicationGuard == nil {
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			if err := s.wikiService.RebuildLinks(bgCtx, kbID); err != nil {
+				logger.Warnf(bgCtx, "code wiki publish: rebuild links failed (non-fatal): %v", err)
+			}
+		}()
+	}
+	s.recordRunEvent(ctx, run, "published", "本轮已发布；未变文档、章节与历史证据原样保留", nil)
 
 	recordKBActivity(ctx, s.audit, kb.TenantID, kbID, types.AuditActionKBUpdated,
 		"code_wiki_run", run.ID, types.AuditOutcomeSuccess,
-		map[string]any{"published_pages": len(publishable), "skipped": len(failedPages)})
+		map[string]any{"published_pages": len(publishable), "skipped": len(pages) - len(publishable)})
 	logger.Infof(ctx, "code wiki publish: run %s published %d pages", run.ID, len(publishable))
 	return run, nil
+}
+
+func codeWikiCandidatePath(run *types.CodeWikiRun, candidate *types.CodeWikiRunPage) ([]string, error) {
+	folders, err := codeWikiFoldersForRun(run)
+	if err != nil {
+		return nil, err
+	}
+	root, ok := folders[candidate.Category]
+	if !ok {
+		return nil, fmt.Errorf("unknown code wiki category %q", candidate.Category)
+	}
+	path := []string(candidate.CategoryPath)
+	if len(path) == 0 {
+		return root, nil
+	}
+	if len(path) < len(root) {
+		return nil, fmt.Errorf("invalid category path")
+	}
+	for i := range root {
+		if path[i] != root[i] {
+			return nil, fmt.Errorf("category path escapes its fixed directory")
+		}
+	}
+	if len(path) > 4 {
+		return nil, fmt.Errorf("document directory exceeds depth limit")
+	}
+	for _, segment := range path {
+		if segment == "" || strings.TrimSpace(segment) != segment || strings.ContainsAny(segment, "/\\\x00") {
+			return nil, fmt.Errorf("invalid category path segment")
+		}
+	}
+	return path, nil
+}
+
+// A successful subset is not a successful run. Check the persisted plan,
+// not just counters supplied by the worker, before any publishing writes.
+func validateCodeWikiPublishCompleteness(run *types.CodeWikiRun, pages []*types.CodeWikiRunPage) error {
+	if len(pages) == 0 || len(pages) != run.TotalPages || run.FailedPages > 0 {
+		return fmt.Errorf("run has incomplete or failed pages; inspect page details before publishing")
+	}
+	for _, page := range pages {
+		if page.Status == types.CodeWikiRunPageStatusPending || page.GenerationError != "" || page.ValidationStatus != "passed" {
+			return fmt.Errorf("page %s is incomplete or unvalidated; inspect page details before publishing", page.PageKey)
+		}
+	}
+	return nil
 }
 
 // buildPublishedWikiPage computes the next wiki page state from a staged
@@ -168,19 +273,34 @@ func buildPublishedWikiPage(
 	folderIDByCategory map[string]string,
 ) (*types.WikiPage, *types.WikiPageRevision, error) {
 	now := time.Now().UTC()
-	categoryPath := codeWikiCategoryFolder[candidate.Category]
-	if categoryPath == nil {
-		categoryPath = []string{"代码文档"}
+	categoryPath, err := codeWikiCandidatePath(run, candidate)
+	if err != nil {
+		return nil, nil, err
 	}
-	metadata := map[string]interface{}{
-		"code_wiki_category":    candidate.Category,
-		"code_wiki_run_id":      run.ID,
-		"code_wiki_profile_version": run.ProfileVersion,
+	if live != nil && strings.Join(live.CategoryPath, "\x00") != strings.Join(categoryPath, "\x00") {
+		if len(candidate.CategoryPath) == 0 || strings.Join(live.CategoryPath, "\x00") != strings.Join(candidate.CategoryPath, "\x00") {
+			return nil, nil, fmt.Errorf("page %s directory change requires an explicit migration", candidate.PageKey)
+		}
+		categoryPath = []string(live.CategoryPath)
 	}
+	metadata := map[string]interface{}{}
+	if live != nil && len(live.PageMetadata) > 0 {
+		if err := json.Unmarshal(live.PageMetadata, &metadata); err != nil {
+			return nil, nil, fmt.Errorf("invalid existing page metadata")
+		}
+	}
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	metadata["code_wiki_category"], metadata["code_wiki_run_id"], metadata["code_wiki_profile_version"] = candidate.Category, run.ID, run.ProfileVersion
 	metadataJSON, _ := json.Marshal(metadata)
 	outLinks := parseCodeWikiOutLinks(candidate.Content)
 
 	if live == nil {
+		folderID := folderIDByCategory[candidate.PageKey]
+		if folderID == "" {
+			folderID = folderIDByCategory[candidate.Category]
+		}
 		page := &types.WikiPage{
 			ID:              uuid.NewString(),
 			TenantID:        kb.TenantID,
@@ -191,7 +311,8 @@ func buildPublishedWikiPage(
 			Status:          types.WikiPageStatusPublished,
 			Content:         candidate.Content,
 			Summary:         candidate.Summary,
-			FolderID:        folderIDByCategory[candidate.Category],
+			FolderID:        folderID,
+			SortOrder:       candidate.SortOrder,
 			CategoryPath:    types.StringArray(categoryPath),
 			OutLinks:        outLinks,
 			PageMetadata:    types.JSON(metadataJSON),
@@ -200,6 +321,7 @@ func buildPublishedWikiPage(
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		}
+		normalizeWikiHierarchy(page)
 		return page, nil, nil
 	}
 	// Snapshot the superseded version BEFORE mutating (revert keeps the
@@ -226,7 +348,7 @@ func buildPublishedWikiPage(
 	live.Status = types.WikiPageStatusPublished
 	live.Content = candidate.Content
 	live.Summary = candidate.Summary
-	live.FolderID = folderIDByCategory[candidate.Category]
+	// Existing page identity, folder, parent and order survive ordinary updates.
 	live.CategoryPath = types.StringArray(categoryPath)
 	live.OutLinks = outLinks
 	live.PageMetadata = types.JSON(metadataJSON)

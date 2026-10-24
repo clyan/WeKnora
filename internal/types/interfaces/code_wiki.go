@@ -110,6 +110,13 @@ type CodeWikiRepository interface {
 	// UpdateRun persists progress/status transitions. Callers re-read the
 	// run before deciding transitions; the repo does not version-check.
 	UpdateRun(ctx context.Context, run *types.CodeWikiRun) error
+	// RequestRunControl changes only control flags, without writing a stale
+	// worker status/counters. Resume clears the pause flag on a paused run.
+	RequestRunControl(ctx context.Context, kbID, runID, control string) error
+	RecordRunEvent(ctx context.Context, event *types.CodeWikiRunEvent) error
+	ListRunEvents(ctx context.Context, kbID, runID string, beforeID int64) ([]*types.CodeWikiRunEvent, error)
+	HeartbeatRun(ctx context.Context, runID, owner string) error
+	ApproveRunImpact(ctx context.Context, kbID, runID, planToken string, config types.JSON) error
 	// TryAcquireRunLease atomically claims a pending run for a worker:
 	// succeeds only when status is still pending (or the previous lease
 	// expired). Returns false when another worker owns the run.
@@ -129,8 +136,13 @@ type CodeWikiRepository interface {
 
 	// UpsertRunPage inserts or replaces one staged candidate page.
 	UpsertRunPage(ctx context.Context, page *types.CodeWikiRunPage) error
+	// UpdateRunPageProgress records the current substep on an existing pending
+	// page without replacing its identity, baseline, or candidate content.
+	UpdateRunPageProgress(ctx context.Context, runID, pageKey, step string) error
 	// ListRunPages returns the staged pages for a run.
 	ListRunPages(ctx context.Context, runID string) ([]*types.CodeWikiRunPage, error)
+	// ListRawWikiPages returns exact stored rows for freezing publication guards.
+	ListRawWikiPages(ctx context.Context, kbID string) ([]*types.WikiPage, error)
 	// UpdateRunPageStatus persists staging status transitions
 	// (staged → published/conflict/skipped).
 	UpdateRunPageStatus(ctx context.Context, page *types.CodeWikiRunPage) error
@@ -143,6 +155,7 @@ type CodeWikiRepository interface {
 	CreateEvidence(ctx context.Context, rows []*types.CodeWikiPageEvidence) error
 	// ListEvidenceByPageVersion returns citations for one page version.
 	ListEvidenceByPageVersion(ctx context.Context, kbID, pageID string, version int) ([]*types.CodeWikiPageEvidence, error)
+	ListSourcePages(ctx context.Context, kbID, repositoryID, snapshotID, path, after string) (*types.CodeWikiSourcePages, error)
 	// ListEvidenceByIDs resolves evidence rows by id within a KB.
 	ListEvidenceByIDs(ctx context.Context, kbID string, ids []string) ([]*types.CodeWikiPageEvidence, error)
 	// DeleteEvidenceByRun removes a run's evidence (unpublished/canceled runs).
@@ -175,12 +188,17 @@ type CodeWikiRepository interface {
 type TX interface {
 	// GetWikiPageBySlug reads a live wiki page within the transaction.
 	GetWikiPageBySlug(kbID, slug string) (*types.WikiPage, error)
+	EnsureWikiFolderPath(kbID string, tenantID uint64, path []string, sortOrder int) (string, error)
 }
 
 // CodeWikiService defines the code wiki application service: analysis
 // provider profiles, repository binding management, snapshot sync,
 // generation runs and publication.
 type CodeWikiService interface {
+	ApproveRunImpact(ctx context.Context, kbID, runID string, req *types.CodeWikiImpactReviewRequest) error
+	ListSourceDirectory(ctx context.Context, kbID, repositoryID, snapshotID, prefix, after string) (*types.CodeWikiSourceDirectory, error)
+	ListSourcePages(ctx context.Context, kbID, repositoryID, snapshotID, path, after string) (*types.CodeWikiSourcePages, error)
+	ListRunEvents(ctx context.Context, kbID, runID string, beforeID int64) ([]*types.CodeWikiRunEvent, error)
 	// --- Analysis provider profile ---
 
 	// GetAnalysisProfile returns the KB's analysis profile.

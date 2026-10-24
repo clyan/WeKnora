@@ -582,6 +582,8 @@ func IsTerminalCodeWikiRunStatus(status string) bool {
 // publish) or failed/canceled. Exactly one run per KB may be
 // status=published (partial unique index).
 type CodeWikiRun struct {
+	// NoChanges is response-only: identical published inputs need no new run.
+	NoChanges bool `json:"no_changes,omitempty" gorm:"-"`
 	// Unique identifier (UUID)
 	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
 	TenantID uint64 `json:"tenant_id" gorm:"index"`
@@ -637,6 +639,10 @@ func (CodeWikiRun) TableName() string { return "code_wiki_runs" }
 // enabled repository was excluded — why. During generation the run never
 // follows the branch forward; the snapshot is the analysis input.
 type CodeWikiRunRepository struct {
+	Ref string `json:"ref,omitempty" gorm:"-"`
+	FilterHash string `json:"filter_hash,omitempty" gorm:"-"`
+	IncludePaths StringArray `json:"include_paths,omitempty" gorm:"-"`
+	ExcludePatterns StringArray `json:"exclude_patterns,omitempty" gorm:"-"`
 	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
 	TenantID uint64 `json:"tenant_id" gorm:"index"`
 	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
@@ -667,6 +673,7 @@ const (
 	CodeWikiRunPageStatusConflict  = "conflict" // live page edited since baseline
 	CodeWikiRunPageStatusPublished = "published"
 	CodeWikiRunPageStatusSkipped   = "skipped" // dropped by user choice at publish
+	CodeWikiRunPageStatusPreserved = "preserved" // unchanged page, no live-row/evidence write
 )
 
 // CodeWikiRunPage is one candidate page produced by a run, staged until the
@@ -676,6 +683,12 @@ const (
 // verifies the live page has not been human-edited since (otherwise the
 // page is marked conflict and the batch publish pauses).
 type CodeWikiRunPage struct {
+	PlanMetadata JSON `json:"plan_metadata,omitempty" gorm:"type:jsonb"`
+	SortOrder int `json:"sort_order" gorm:"default:0"`
+	// Response-only comparison, exposed only while the raw baseline matches.
+	BaselineContent *string `json:"baseline_content,omitempty" gorm:"-"`
+	BaselineChanged bool `json:"baseline_changed,omitempty" gorm:"-"`
+	SectionChanges []CodeWikiSectionChange `json:"section_changes,omitempty" gorm:"-"`
 	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
 	TenantID uint64 `json:"tenant_id" gorm:"index"`
 	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
@@ -702,7 +715,8 @@ type CodeWikiRunPage struct {
 	// BaselineLastEditSource records who authored the baseline version
 	// (pipeline vs user) so publish can protect human edits.
 	BaselineLastEditSource string `json:"baseline_last_edit_source,omitempty" gorm:"type:varchar(16)"`
-	// Validation result for evidence references: passed | failed
+	// Pending page progress: pending | retrieving | generating | validating.
+	// Once staged, evidence validation result: passed | failed.
 	ValidationStatus string `json:"validation_status" gorm:"type:varchar(32);default:'pending'"`
 	// Structured validation errors (missing files, out-of-range lines, …)
 	ValidationErrors JSON `json:"validation_errors,omitempty" gorm:"type:jsonb"`

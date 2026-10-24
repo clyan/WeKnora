@@ -76,6 +76,10 @@ export interface CodeWikiRepositoryBinding {
 }
 
 export interface CodeWikiRunRepository {
+	ref?: string;
+	filter_hash?: string;
+	include_paths?: string[];
+	exclude_patterns?: string[];
   repository_id: string;
   snapshot_id?: string;
   artifact_id?: string;
@@ -104,6 +108,7 @@ export type CodeWikiRunStatus =
   | 'failed' | 'canceled';
 
 export interface CodeWikiRun {
+  no_changes?: boolean;
   id: string;
   knowledge_base_id: string;
   status: CodeWikiRunStatus;
@@ -117,6 +122,8 @@ export interface CodeWikiRun {
   tokens_used: number;
   error_message?: string;
   cancel_requested: boolean;
+  pause_requested: boolean;
+  updated_at?: string;
   started_at?: string | null;
   finished_at?: string | null;
   published_at?: string | null;
@@ -124,6 +131,9 @@ export interface CodeWikiRun {
 }
 
 export interface CodeWikiRunPage {
+	baseline_content?: string;
+	baseline_changed?: boolean;
+  section_changes?: Array<{ id: string; title: string; before: string; after: string }>;
   id: string;
   run_id: string;
   page_key: string;
@@ -135,7 +145,7 @@ export interface CodeWikiRunPage {
   evidence?: CodeWikiEvidenceSpec[] | null;
   baseline_version: number;
   validation_status: string;
-  status: 'pending' | 'staged' | 'conflict' | 'published' | 'skipped';
+  status: 'pending' | 'staged' | 'conflict' | 'published' | 'skipped' | 'preserved';
   generation_error?: string;
 }
 
@@ -143,6 +153,68 @@ export interface CodeWikiRunDetail {
   run: CodeWikiRun;
   manifest: CodeWikiRunRepository[];
   pages: CodeWikiRunPage[] | null;
+  events?: CodeWikiRunEvent[];
+  worker_heartbeat_at?: string | null;
+  baseline_run_id?: string;
+  source_changes?: CodeWikiSourceChange[] | null;
+  impact_plan?: CodeWikiImpactPlan | null;
+}
+
+export interface CodeWikiImpactPlan {
+  plan_token: string;
+  review_required?: boolean;
+  review_approved?: boolean;
+  new_pages?: Record<string, string>;
+  sections?: Record<string, Array<{ id: string; title: string; hash: string }>>;
+  impact?: Record<string, { kind: 'joint_review' | 'citation_changed' | 'scope_changed' | 'new_source'; changed_sources?: string[]; section_ids?: string[] }>;
+}
+
+export function approveCodeWikiImpact(kbId: string, runId: string, plan_token: string, sections: Record<string, string[]>) {
+  return post(`/api/v1/knowledgebase/${kbId}/code-wiki/runs/${runId}/impact-review`, { plan_token, sections });
+}
+
+export interface CodeWikiRunEvent {
+  id: number;
+  kind: string;
+  message: string;
+  retry_at?: string;
+  created_at: string;
+}
+
+export interface CodeWikiSourceChange {
+  repository_id: string;
+  path: string;
+  kind: string;
+  before_hash?: string;
+  after_hash?: string;
+}
+
+export interface CodeWikiSourceEntry {
+  name: string;
+  path: string;
+  is_directory: boolean;
+  size: number;
+}
+
+export interface CodeWikiSourceDirectory {
+  snapshot_id: string;
+  commit_sha: string;
+  prefix: string;
+  entries: CodeWikiSourceEntry[];
+  next_cursor?: string;
+}
+
+export interface CodeWikiSourcePage { page_key: string; title: string; version: number; matches_snapshot: boolean }
+export function listCodeWikiSourcePages(kbId: string, repositoryId: string, params: {snapshot_id: string; path: string; after?: string}) {
+  return get(`/api/v1/knowledgebase/${kbId}/code-wiki/repositories/${repositoryId}/source-pages`, {params});
+}
+
+export function listCodeWikiSourceDirectory(kbId: string, repositoryId: string, params: { snapshot_id?: string; prefix?: string; after?: string }) {
+  return get(`/api/v1/knowledgebase/${kbId}/code-wiki/repositories/${repositoryId}/files`, { params });
+}
+
+export function listCodeWikiRunEvents(kbId: string, runId: string, before = 0) {
+  return get(`/api/v1/knowledgebase/${kbId}/code-wiki/runs/${runId}/events`, { params: { before } });
 }
 
 export interface CodeWikiEvidenceView {
