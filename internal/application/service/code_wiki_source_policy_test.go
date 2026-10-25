@@ -138,7 +138,6 @@ func TestCodeWikiSourceCandidatesPersistWithoutPromotingThemToFacts(t *testing.T
 	_, err = s.readSource(context.Background(), state, scope, "src/broken.ts", 1, 1)
 	require.ErrorContains(t, err, "源码语法无法完整解析")
 	// Simulate a restart: the immutable records must replay identically.
-	state.qualifiedSources = nil
 	_, err = s.readSource(context.Background(), state, scope, "custom/view.tsx", 1, 2)
 	require.NoError(t, err)
 	rows, err := repo.ListFactRecords(context.Background(), factScope(state), "fact", "", 500)

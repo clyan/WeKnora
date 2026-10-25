@@ -2,12 +2,35 @@ package limiter
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+func TestNonBlockingGateSharesExistingSlotsWithoutWaiting(t *testing.T) {
+	t.Cleanup(func() { SetGovernor(nil, 0) })
+	SetGovernor(NewLocalLimiter(), 1)
+	held := Gate(withBackground(), "same-model")
+	_, err := TryGateNamedN(withBackground(), "same-model", "name", 0)
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("expected busy, got %v", err)
+	}
+	held()
+	release, err := TryGateNamedN(withBackground(), "same-model", "name", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	release()
+	ctx, cancel := context.WithCancel(withBackground())
+	cancel()
+	if _, err := TryGateNamedN(ctx, "same-model", "name", 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel must not acquire a slot: %v", err)
+	}
+}
 
 func withBackground() context.Context {
 	return types.WithBackgroundTask(context.Background())

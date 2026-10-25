@@ -267,12 +267,25 @@ func (h *CodeWikiHandler) GetRun(c *gin.Context) {
 	if !ok {
 		return
 	}
-	run, manifest, pages, err := h.service.GetRunDetail(ctx, kbID, c.Param("id"))
-	if err != nil {
-		respondCodeWikiError(c, err)
-		return
+	var run *types.CodeWikiRun
+	var manifest []*types.CodeWikiRunRepository
+	var pages []*types.CodeWikiRunPage
+	var topics []*types.CodeWikiTopic
+	var events []*types.CodeWikiRunEvent
+	var revision string
+	var err error
+	if service, ok := h.service.(interfaces.CodeWikiProgressService); ok {
+		var snapshot *types.CodeWikiProgressSnapshot
+		snapshot, err = service.GetRunProgress(ctx, kbID, c.Param("id"))
+		if err == nil {
+			run, manifest, pages, topics, events, revision = snapshot.Run, snapshot.Manifest, snapshot.Pages, snapshot.Topics, snapshot.Events, snapshot.Revision
+		}
+	} else {
+		run, manifest, pages, err = h.service.GetRunDetail(ctx, kbID, c.Param("id"))
+		if err == nil {
+			events, err = h.service.ListRunEvents(ctx, kbID, run.ID, 0)
+		}
 	}
-	events, err := h.service.ListRunEvents(ctx, kbID, run.ID, 0)
 	if err != nil {
 		respondCodeWikiError(c, err)
 		return
@@ -298,16 +311,143 @@ func (h *CodeWikiHandler) GetRun(c *gin.Context) {
 		at := run.LeaseExpiresAt.Add(-time.Duration(types.CodeWikiRunLeaseTTLSeconds) * time.Second)
 		heartbeatAt = &at
 	}
+	if service, ok := h.service.(interfaces.CodeWikiTopicService); ok && run.ExecutionEpoch > 0 {
+		if revision == "" {
+			topics, err = service.ListRunTopics(ctx, kbID, run.ID)
+		}
+		if err != nil {
+			respondCodeWikiError(c, err)
+			return
+		}
+		// The discovery worker has yielded; topic workers now report liveness.
+		heartbeatAt = nil
+		for _, topic := range topics {
+			if topic.Status == "running" && (heartbeatAt == nil || topic.UpdatedAt.After(*heartbeatAt)) {
+				at := topic.UpdatedAt
+				heartbeatAt = &at
+			}
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
 		"run":                 run,
 		"manifest":            manifest,
 		"pages":               pages,
 		"events":              events,
+		"topics":              topics,
+		"progress_revision":   revision,
 		"source_changes":      frozen.SourceChanges,
 		"baseline_run_id":     baselineRunID,
 		"worker_heartbeat_at": heartbeatAt,
 		"impact_plan":         frozen.Guard,
 	}})
+}
+
+func (h *CodeWikiHandler) RetryRunTopic(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	service, ok := h.service.(interfaces.CodeWikiTopicService)
+	if !ok {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("主题执行暂未就绪，请更新服务后重试"))
+		return
+	}
+	if err := service.RetryRunTopic(c.Request.Context(), kbID, c.Param("id"), c.Param("topic_key")); err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"success": true})
+}
+
+func (h *CodeWikiHandler) GetRunTopic(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	service, ok := h.service.(interfaces.CodeWikiTopicService)
+	if !ok {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("主题查询暂未就绪"))
+		return
+	}
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("无效的页码"))
+		return
+	}
+	detail, err := service.GetRunTopic(c.Request.Context(), kbID, c.Param("id"), c.Param("topic_key"), c.DefaultQuery("kind", "items"), offset)
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": detail})
+}
+
+func (h *CodeWikiHandler) ListRunTopics(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	service, ok := h.service.(interfaces.CodeWikiTopicService)
+	if !ok {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("主题查询暂未就绪"))
+		return
+	}
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "30"))
+	if err != nil {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("请选择有效的每页主题数"))
+		return
+	}
+	page, err := service.GetRunTopicPage(c.Request.Context(), kbID, c.Param("id"), c.Query("status"), c.Query("cursor"), limit)
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": page})
+}
+
+func (h *CodeWikiHandler) GetRunTopicSource(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	service, ok := h.service.(interfaces.CodeWikiTopicService)
+	if !ok {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("源码查询暂未就绪"))
+		return
+	}
+	start, err := strconv.Atoi(c.DefaultQuery("start", "0"))
+	if err != nil {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("无效的源码行号"))
+		return
+	}
+	source, err := service.GetRunTopicSource(c.Request.Context(), kbID, c.Param("id"), c.Param("topic_key"), c.Query("evidence"), start)
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": source})
+}
+
+func (h *CodeWikiHandler) ReviewRunTopic(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	service, ok := h.service.(interfaces.CodeWikiTopicService)
+	if !ok {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("主题复核暂未就绪"))
+		return
+	}
+	var req types.CodeWikiTopicReviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("请检查复核内容"))
+		return
+	}
+	if err := service.ReviewRunTopic(c.Request.Context(), kbID, c.Param("id"), c.Param("topic_key"), &req); err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 func (h *CodeWikiHandler) ApproveRunImpact(c *gin.Context) {
@@ -493,10 +633,12 @@ func respondCodeWikiError(c *gin.Context, err error) {
 	}
 	status := http.StatusInternalServerError
 	switch err {
-	case types.ErrCodeWikiRepoNotFound, types.ErrCodeWikiRunNotFound,
+	case types.ErrCodeWikiRepoNotFound, types.ErrCodeWikiRunNotFound, types.ErrCodeWikiTopicNotFound,
 		types.ErrCodeWikiSnapshotNotFound, types.ErrCodeWikiEvidenceNotFound,
 		types.ErrCodeWikiProfileNotFound, types.ErrCodeWikiArtifactNotFound:
 		status = http.StatusNotFound
+	case types.ErrCodeWikiTopicChanged, types.ErrCodeWikiProgressChanged:
+		status = http.StatusConflict
 	case types.ErrCodeWikiNotCodeWikiKB, types.ErrCodeWikiRunNotStaged,
 		types.ErrCodeWikiRunActiveExists, types.ErrCodeWikiNoRepositories,
 		types.ErrCodeWikiSourceMismatch, types.ErrCodeWikiProfileInvalid,

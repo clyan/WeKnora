@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -48,6 +49,26 @@ func TestConcurrencyChatInteractiveNotGated(t *testing.T) {
 	}
 	if _, err := w.Chat(context.Background(), nil, nil); err != nil {
 		t.Fatalf("interactive chat 2: %v", err)
+	}
+}
+
+func TestConcurrencyChatNonBlockingDoesNotEnterProviderWhileBusy(t *testing.T) {
+	t.Cleanup(func() { limiter.SetGovernor(nil, 0) })
+	limiter.SetGovernor(limiter.NewLocalLimiter(), 1)
+	ctx := types.WithBackgroundTask(context.Background())
+	release := limiter.Gate(ctx, "model-x")
+	w := &concurrencyChat{inner: &fakeChat{id: "model-x"}}
+	response, err := w.Chat(limiter.WithNonBlocking(ctx), nil, nil)
+	if !errors.Is(err, limiter.ErrBusy) || response != nil {
+		t.Fatalf("busy provider must not be called: %v, %v", response, err)
+	}
+	// The same context flag leaves interactive calls unchanged.
+	if _, err := w.Chat(limiter.WithNonBlocking(context.Background()), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if _, err := w.Chat(limiter.WithNonBlocking(ctx), nil, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 

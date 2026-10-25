@@ -38,6 +38,7 @@ func sameCodeWikiGenerationInputs(published *types.CodeWikiRun, modelID string, 
 	// Execution checkpoints do not change generation inputs.
 	previous.FrontendPlanning, cfg.FrontendPlanning = nil, nil
 	previous.FrontendPlanReady, cfg.FrontendPlanReady = false, false
+	previous.TopicConcurrency, cfg.TopicConcurrency = 0, 0
 	if !reflect.DeepEqual(previous, cfg) {
 		return false
 	}

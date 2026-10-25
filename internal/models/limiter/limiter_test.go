@@ -2,12 +2,39 @@ package limiter
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
+
+func TestRedisNonBlockingAcquireSharesSemaphoreAndFailsClosed(t *testing.T) {
+	lim, server, rdb := newTestLimiter(t, time.Minute, 10*time.Millisecond)
+	ctx := context.Background()
+	held, err := lim.Acquire(ctx, "shared", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lim.TryAcquire(ctx, "shared", 1); !errors.Is(err, ErrBusy) {
+		t.Fatalf("expected busy, got %v", err)
+	}
+	if got := zcard(t, rdb, "shared"); got != 1 {
+		t.Fatalf("unexpected holder count %d", got)
+	}
+	held()
+	release, err := lim.TryAcquire(ctx, "shared", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	release()
+	server.Close()
+	if _, err := lim.TryAcquire(ctx, "shared", 1); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("durable tasks must requeue on a limiter outage: %v", err)
+	}
+}
 
 func newTestLimiter(t *testing.T, ttl, poll time.Duration) (*redisLimiter, *miniredis.Miniredis, *redis.Client) {
 	t.Helper()

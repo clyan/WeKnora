@@ -64,6 +64,8 @@ func TestCodeWikiFrontendNoChangeIgnoresExecutionCheckpoints(t *testing.T) {
 	published := &types.CodeWikiRun{Status: types.CodeWikiRunStatusPublished, ModelID: "model", ConfigSnapshot: blob}
 	repos := []*types.CodeWikiRunRepository{{RepositoryID: "frontend", SnapshotID: "snap", ArtifactID: "index", CommitSHA: "sha", Role: "frontend"}}
 	require.True(t, sameCodeWikiGenerationInputs(published, "model", 0, cfg, repos, repos))
+	cfg.TopicConcurrency = 3
+	require.True(t, sameCodeWikiGenerationInputs(published, "model", 0, cfg, repos, repos), "execution concurrency does not change code facts")
 	cfg.FrontendPlannerVersion++
 	require.False(t, sameCodeWikiGenerationInputs(published, "model", 0, cfg, repos, repos), "planner changes are generation inputs")
 }

@@ -142,7 +142,7 @@ func TestCodeWikiSectionGenerationAndPublicationReplayPreservesVersionsAndEviden
 		if round != 1 {
 			guard.AllowedSections[live.Slug] = map[string]string{sections[1].ID: sections[1].Hash}
 		}
-		cfg := codeWikiRunConfig{Mode: types.CodeWikiModeProject, SourcePolicyVersion: types.CodeWikiSourcePolicyVersion,
+		cfg := codeWikiRunConfig{TopicVersion: 1, Mode: types.CodeWikiModeProject, SourcePolicyVersion: types.CodeWikiSourcePolicyVersion,
 			FactSchemaVersion: types.CodeWikiFactSchemaVersion, SourceAnalyzerVersion: types.CodeWikiSourceAnalyzerVersion,
 			DirectoryVersion: 1, MaxModelCalls: 5, PublicationGuard: guard}
 		blob, err := json.Marshal(cfg)

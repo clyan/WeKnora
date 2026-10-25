@@ -41,3 +41,15 @@ export const Screen = () => <button {...runtimeButtons} disabled={loading} onCli
 	}
 	require.True(t, found)
 }
+
+func TestDiscoveryKeepsDistinctOperationsOnTheSameLine(t *testing.T) {
+	if _, err := ModulePath(); err != nil {
+		t.Skip(err)
+	}
+	parsed, err := Analyze(context.Background(), "view.tsx", `export const View = () => <><button onClick={save}>Save</button><button onClick={save}>Save again</button></>;`)
+	require.NoError(t, err)
+	discovery := Discover(parsed.Nodes)
+	require.Len(t, discovery.Candidates, 2)
+	require.Equal(t, discovery.Candidates[0].StartLine, discovery.Candidates[1].StartLine)
+	require.NotEqual(t, discovery.Candidates[0].StartOffset, discovery.Candidates[1].StartOffset)
+}

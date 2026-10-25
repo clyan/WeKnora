@@ -11,7 +11,7 @@
               <button type="button"
                 :class="['document-nav-item', { selected: pageKey === page.page_key }]"
                 :aria-current="pageKey === page.page_key ? 'page' : undefined" @click="pageKey = page.page_key">
-                <t-loading v-if="working && page.status === 'pending' && ['retrieving', 'generating', 'validating'].includes(page.validation_status)" size="16px" />
+                <t-loading v-if="pageRunning(page)" size="16px" />
                 <t-icon v-else :name="page.generation_error ? 'error-circle' : page.content ? 'file' : 'time'" size="16px" />
                 <span>{{ page.title || page.page_key }}</span>
               </button>
@@ -26,7 +26,7 @@
             <h2>{{ selectedPage.title || selectedPage.page_key }}</h2>
             <div class="document-meta">
               <t-tag size="small" variant="light" :theme="selectedPage.generation_error ? 'danger' : selectedPage.status === 'pending' ? 'default' : 'success'">
-                {{ $t(selectedPage.generation_error ? 'codeWiki.runs.pageFailed' : selectedPage.status === 'pending' ? 'codeWiki.runs.pagePending' : 'codeWiki.runs.pageDone') }}
+                {{ selectedTopic ? $t(`codeWiki.topics.${selectedTopic.status}`) : $t(selectedPage.generation_error ? 'codeWiki.runs.pageFailed' : selectedPage.status === 'pending' ? 'codeWiki.runs.pagePending' : 'codeWiki.runs.pageDone') }}
               </t-tag>
               <p>{{ $t('codeWiki.workspace.candidateHint') }}</p>
             </div>
@@ -37,9 +37,10 @@
             <CodeWikiMarkdown :content="selectedPage.content" />
           </article>
           <div v-else class="document-empty" role="status">
-            <t-loading v-if="working && selectedPage.status === 'pending'" size="24px" />
+            <t-loading v-if="pageRunning(selectedPage)" size="24px" />
             <t-icon v-else name="file" size="28px" />
-            <p>{{ $t(selectedPage.status === 'skipped' && newPages?.[selectedPage.page_key]
+            <p v-if="selectedTopic">{{ selectedTopic.action || $t(`codeWiki.topics.${selectedTopic.status}`) }}</p>
+            <p v-else>{{ $t(selectedPage.status === 'skipped' && newPages?.[selectedPage.page_key]
               ? 'codeWiki.workspace.notCreated'
               : ['retrieving', 'generating', 'validating'].includes(selectedPage.validation_status)
                 ? `codeWiki.workspace.${selectedPage.validation_status}` : 'codeWiki.runs.pagePending') }}</p>
@@ -77,16 +78,20 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import type { CodeWikiRunPage } from '@/api/code-wiki'
+import type { CodeWikiRunPage, CodeWikiTopic } from '@/api/code-wiki'
 import { enhanceMarkdownContainer } from '@/utils/mermaidShared'
 import CodeWikiMarkdown from './CodeWikiMarkdown.vue'
 import CodeWikiDocumentTree from './CodeWikiDocumentTree.vue'
 import { buildDocumentTree } from './documentTree'
 
-const props = defineProps<{ pages: CodeWikiRunPage[]; working: boolean; newPages?: Record<string, string> }>()
+const props = defineProps<{ pages: CodeWikiRunPage[]; topics?: CodeWikiTopic[]; working: boolean; newPages?: Record<string, string> }>()
 const visible = defineModel<boolean>('visible', { default: false })
 const pageKey = defineModel<string>('pageKey', { default: '' })
 const selectedPage = computed(() => props.pages.find(page => page.page_key === pageKey.value))
+const selectedTopic = computed(() => props.topics?.find(topic => topic.topic_key === pageKey.value))
+const pageRunning = (page: CodeWikiRunPage) => props.working && (props.topics?.length
+  ? props.topics.some(topic => topic.topic_key === page.page_key && topic.status === 'running')
+  : page.status === 'pending' && ['retrieving', 'generating', 'validating'].includes(page.validation_status))
 const documentTree = computed(() => buildDocumentTree(props.pages))
 const readingPane = ref<HTMLElement | null>(null)
 

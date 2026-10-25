@@ -18,7 +18,7 @@ func markCodeWikiSourceCompatibility(run *types.CodeWikiRun) {
 		return
 	}
 	var cfg codeWikiRunConfig
-	run.RequiresSourceRebuild = json.Unmarshal(run.ConfigSnapshot, &cfg) != nil || validateCodeWikiRunPolicy(cfg) != nil
+	run.RequiresSourceRebuild = json.Unmarshal(run.ConfigSnapshot, &cfg) != nil || validateCodeWikiExecutionPolicy(cfg) != nil
 	run.FullSourceReanalysis = cfg.FullSourceReanalysis
 }
 
@@ -56,10 +56,6 @@ func qualifiedCodeWikiSource(ctx context.Context, state *codeWikiRunState, scope
 	if err := verifySnapshotFileLines(scope.LocalPath, path, 1, 1); err != nil {
 		return nil, err
 	}
-	key := scope.RepositoryID + "\x00" + scope.SnapshotID + "\x00" + path
-	if result := state.qualifiedSources[key]; result != nil {
-		return result, nil
-	}
 	info, err := os.Stat(filepath.Join(scope.LocalPath, filepath.FromSlash(path)))
 	if err != nil {
 		return nil, err
@@ -67,8 +63,8 @@ func qualifiedCodeWikiSource(ctx context.Context, state *codeWikiRunState, scope
 	if info.Size() > 2<<20 {
 		return nil, fmt.Errorf("实现文件超过当前分析器大小范围，必须记录未支持")
 	}
-	raw := readSnapshotFileBounded(scope.LocalPath, path, 2<<20)
-	result, err := codefacts.Analyze(ctx, path, raw)
+	raw := readSnapshotSourceBounded(scope.LocalPath, path, 2<<20)
+	result, err := analyzeCachedCodeWikiSource(ctx, state, scope, path, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -99,10 +95,6 @@ func qualifiedCodeWikiSource(ctx context.Context, state *codeWikiRunState, scope
 			return nil, err
 		}
 	}
-	if state.qualifiedSources == nil {
-		state.qualifiedSources = make(map[string]*codefacts.Result)
-	}
-	state.qualifiedSources[key] = result
 	return result, nil
 }
 
@@ -115,6 +107,16 @@ func validateCodeWikiRunPolicy(cfg codeWikiRunConfig) error {
 	}
 	if cfg.SourcePolicyVersion != types.CodeWikiSourcePolicyVersion || cfg.FactSchemaVersion != types.CodeWikiFactSchemaVersion || cfg.SourceAnalyzerVersion != types.CodeWikiSourceAnalyzerVersion {
 		return fmt.Errorf("此任务使用旧的源码证据规则，无法继续或发布；请停止旧任务并创建重建任务，原有内容仍可查看")
+	}
+	return nil
+}
+
+func validateCodeWikiExecutionPolicy(cfg codeWikiRunConfig) error {
+	if err := validateCodeWikiRunPolicy(cfg); err != nil {
+		return err
+	}
+	if cfg.TopicVersion != 1 {
+		return fmt.Errorf("此任务使用旧的正文生成流程，请停止后新建任务；原有文档仍可查看")
 	}
 	return nil
 }

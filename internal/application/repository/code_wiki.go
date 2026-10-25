@@ -418,6 +418,20 @@ func (r *codeWikiRepository) GetRun(ctx context.Context, kbID, id string) (*type
 	return &run, nil
 }
 
+func (r *codeWikiRepository) GetRunControl(ctx context.Context, kbID, id string) (*types.CodeWikiRun, error) {
+	var run types.CodeWikiRun
+	err := r.db.WithContext(ctx).
+		Select("id", "tenant_id", "knowledge_base_id", "status", "pause_requested", "cancel_requested", "execution_epoch", "execution_deadline").
+		Where("id = ? AND knowledge_base_id = ?", id, kbID).First(&run).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, types.ErrCodeWikiRunNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
 func (r *codeWikiRepository) GetRunByID(ctx context.Context, id string) (*types.CodeWikiRun, error) {
 	var run types.CodeWikiRun
 	err := r.db.WithContext(ctx).Where("id = ?", id).First(&run).Error
@@ -589,6 +603,15 @@ func (r *codeWikiRepository) TryAcquireRunLease(ctx context.Context, runID, owne
 // otherwise keep occupying the index slot.
 func (r *codeWikiRepository) DeleteRunsByKB(ctx context.Context, kbID string) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// This runs only as part of an explicitly requested KB deletion.
+		// Topic checkpoints can contain source conclusions and must follow
+		// the same deletion lifecycle as the run's existing evidence/events.
+		if err := tx.Where("run_id IN (?)", tx.Model(&types.CodeWikiRun{}).Select("id").Where("knowledge_base_id = ?", kbID)).Delete(&types.CodeWikiModelSlot{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("knowledge_base_id = ?", kbID).Delete(&types.CodeWikiTopic{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("knowledge_base_id = ?", kbID).Delete(&types.CodeWikiFactRecord{}).Error; err != nil {
 			return err
 		}
@@ -659,7 +682,7 @@ func (r *codeWikiRepository) UpsertRunPage(ctx context.Context, page *types.Code
 func (r *codeWikiRepository) ListRunPages(ctx context.Context, runID string) ([]*types.CodeWikiRunPage, error) {
 	var out []*types.CodeWikiRunPage
 	err := r.db.WithContext(ctx).
-		Where("run_id = ?", runID).Order("sort_order ASC, page_key ASC").Find(&out).Error
+		Where("run_id = ? AND (validation_status IS NULL OR validation_status <> ?)", runID, "superseded").Order("sort_order ASC, page_key ASC").Find(&out).Error
 	return out, err
 }
 

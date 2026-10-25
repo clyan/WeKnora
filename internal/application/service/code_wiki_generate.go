@@ -21,7 +21,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
-	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 )
@@ -29,8 +28,8 @@ import (
 // Code wiki generation pipeline (plan §5.1):
 //
 //	freeze manifest → repository analysis → cross-repo association →
-//	outline planning → per-page evidence retrieval + generation →
-//	citation validation → staging → [explicit publish]
+//	initial topics → bounded topic analysis/checkpoints → independently staged
+//	documents → source-based overview → [explicit review and publish]
 //
 // Every stage persists its outputs; expensive inputs (snapshots, provider
 // artifacts) are prepared by sync and reused across runs, so a retry never
@@ -40,6 +39,10 @@ import (
 // creation and is the ONLY source of generation inputs for the worker — a
 // later config edit cannot change what an in-flight run produces.
 type codeWikiRunConfig struct {
+	TopicVersion           int                                      `json:"topic_version,omitempty"`
+	TopicConcurrency       int                                      `json:"topic_concurrency,omitempty"`
+	ContextWindow          int                                      `json:"context_window,omitempty"`
+	MaxOutputTokens        int                                      `json:"max_output_tokens,omitempty"`
 	Mode                   string                                   `json:"mode,omitempty"`
 	SourcePolicyVersion    int                                      `json:"source_policy_version,omitempty"`
 	FactSchemaVersion      int                                      `json:"fact_schema_version,omitempty"`
@@ -73,21 +76,22 @@ type codeWikiFrozenProvider struct {
 }
 
 type codeWikiPlannedPage struct {
-	SourceSpans     []codeWikiSourceSpan `json:"source_spans,omitempty"`
-	Summary         string               `json:"-"`
-	SortOrder       int                  `json:"-"`
-	RepositoryID    string               `json:"repository_id,omitempty"`
-	InstanceKind    string               `json:"instance_kind,omitempty"`
-	Domain          string               `json:"domain,omitempty"`
-	SourcePaths     []string             `json:"source_paths,omitempty"`
-	PageType        string               `json:"-"`
-	BaselineVersion int                  `json:"-"`
-	BaselineSource  string               `json:"-"`
-	CategoryPath    types.StringArray    `json:"-"`
-	Slug            string               `json:"slug"`
-	Title           string               `json:"title"`
-	Category        string               `json:"category"`
-	Scope           string               `json:"scope"`
+	IndexHints      []codebase.PlanningHint `json:"index_hints,omitempty"`
+	SourceSpans     []codeWikiSourceSpan    `json:"source_spans,omitempty"`
+	Summary         string                  `json:"-"`
+	SortOrder       int                     `json:"-"`
+	RepositoryID    string                  `json:"repository_id,omitempty"`
+	InstanceKind    string                  `json:"instance_kind,omitempty"`
+	Domain          string                  `json:"domain,omitempty"`
+	SourcePaths     []string                `json:"source_paths,omitempty"`
+	PageType        string                  `json:"-"`
+	BaselineVersion int                     `json:"-"`
+	BaselineSource  string                  `json:"-"`
+	CategoryPath    types.StringArray       `json:"-"`
+	Slug            string                  `json:"slug"`
+	Title           string                  `json:"title"`
+	Category        string                  `json:"category"`
+	Scope           string                  `json:"scope"`
 }
 
 const (
@@ -220,12 +224,14 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 		extractionInstructions = kb.WikiConfig.ExtractionInstructions
 	}
 	frozen := codeWikiRunConfig{
+		TopicVersion:           1,
+		TopicConcurrency:       cfg.TopicConcurrencyOrDefault(),
 		Mode:                   types.CodeWikiModeProject,
 		SourcePolicyVersion:    types.CodeWikiSourcePolicyVersion,
 		FactSchemaVersion:      types.CodeWikiFactSchemaVersion,
 		SourceAnalyzerVersion:  types.CodeWikiSourceAnalyzerVersion,
 		FullSourceReanalysis:   true, // Relation-driven impact analysis is not available yet.
-		FrontendPlannerVersion: 1,
+		FrontendPlannerVersion: frontendIndexPlannerVersion,
 		SnapshotReferences:     references,
 		DirectoryVersion:       types.CodeWikiDirectoryVersionFrontend,
 		TemplateID:             types.CodeWikiFrontendTemplate,
@@ -241,6 +247,12 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 			SnapshotDelivery: profile.SnapshotDelivery,
 			SharedRoot:       profile.SharedRoot,
 		},
+	}
+	if s.modelService != nil {
+		if model, modelErr := s.modelService.GetModelByID(ctx, synthesisModelID); modelErr == nil && model != nil {
+			frozen.ContextWindow = model.Parameters.ContextWindow
+			frozen.MaxOutputTokens = model.Parameters.MaxOutputTokens
+		}
 	}
 	if frozen.ContentInstructions == "" {
 		frozen.ContentInstructions = types.CodeWikiFrontendContentInstructions
@@ -397,46 +409,20 @@ func (s *codeWikiService) GetRunDetail(ctx context.Context, kbID, runID string) 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	var frozen codeWikiRunConfig
-	if len(run.ConfigSnapshot) > 0 && json.Unmarshal(run.ConfigSnapshot, &frozen) != nil {
-		return nil, nil, nil, fmt.Errorf("invalid frozen run config")
-	}
-	for _, entry := range manifest {
-		ref := frozen.SnapshotReferences[entry.RepositoryID]
-		entry.Ref, entry.FilterHash, entry.IncludePaths, entry.ExcludePatterns = ref.Ref, ref.FilterHash, ref.IncludePaths, ref.ExcludePatterns
-	}
 	pages, err := s.repo.ListRunPages(ctx, runID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	var raw []*types.WikiPage
 	if run.Status == types.CodeWikiRunStatusStaged {
-		raw, err := s.repo.ListRawWikiPages(ctx, kbID)
+		raw, err = s.repo.ListRawWikiPages(ctx, kbID)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		var cfg codeWikiRunConfig
-		if len(run.ConfigSnapshot) > 0 && json.Unmarshal(run.ConfigSnapshot, &cfg) != nil {
-			return nil, nil, nil, fmt.Errorf("invalid frozen run config")
-		}
-		for _, page := range pages {
-			for _, live := range raw {
-				if live.Slug != page.PageKey {
-					continue
-				}
-				if cfg.PublicationGuard != nil && cfg.PublicationGuard.Pages[live.Slug] == types.CodeWikiPageFingerprint(live) {
-					content := live.Content
-					page.BaselineContent = &content
-					if page.GenerationError == "" && page.Status == types.CodeWikiRunPageStatusStaged {
-						page.SectionChanges = types.CodeWikiSectionChanges(content, page.Content)
-					}
-				} else {
-					page.BaselineChanged = true
-				}
-				break
-			}
-		}
 	}
-	markCodeWikiSourceCompatibility(run)
+	if err := decorateCodeWikiRunDetail(run, manifest, pages, raw); err != nil {
+		return nil, nil, nil, err
+	}
 	return run, manifest, pages, nil
 }
 
@@ -451,8 +437,8 @@ func (s *codeWikiService) ListRuns(ctx context.Context, kbID string) ([]*types.C
 	return runs, err
 }
 
-// CancelRun flags cancellation; the worker observes the flag between stages
-// and between pages. A staged or paused run has no live worker, so it is marked
+// CancelRun flags cancellation; active workers interrupt their request contexts
+// without waiting for the current stage/page. A staged or paused run is marked
 // canceled directly — discarding the candidates affects nothing published.
 func (s *codeWikiService) CancelRun(ctx context.Context, kbID, runID string) error {
 	kb, err := s.requireCodeWikiKB(ctx, kbID)
@@ -480,6 +466,9 @@ func (s *codeWikiService) CancelRun(ctx context.Context, kbID, runID string) err
 		return nil
 	}
 	if err := s.repo.RequestRunControl(ctx, kbID, runID, "cancel"); err != nil {
+		return err
+	}
+	if err := s.refreshRunControl(ctx, run); err != nil {
 		return err
 	}
 	recordKBActivity(ctx, s.audit, kb.TenantID, kbID, types.AuditActionKBUpdated,
@@ -522,7 +511,7 @@ func (s *codeWikiService) persistPlannedPages(ctx context.Context, run *types.Co
 	return nil
 }
 
-// PauseRun flags a pause; the worker observes it between stages/pages and
+// PauseRun flags a pause; the worker interrupts active tool/model requests and
 // parks the run in paused (resumable, keeps the active-run slot).
 func (s *codeWikiService) PauseRun(ctx context.Context, kbID, runID string) error {
 	if _, err := s.requireCodeWikiKB(ctx, kbID); err != nil {
@@ -538,7 +527,10 @@ func (s *codeWikiService) PauseRun(ctx context.Context, kbID, runID string) erro
 	if run.Status == types.CodeWikiRunStatusPaused {
 		return nil // idempotent
 	}
-	return s.repo.RequestRunControl(ctx, kbID, runID, "pause")
+	if err := s.repo.RequestRunControl(ctx, kbID, runID, "pause"); err != nil {
+		return err
+	}
+	return s.refreshRunControl(ctx, run)
 }
 
 // ResumeRun continues a paused run: the persisted plan is picked up where it
@@ -558,7 +550,7 @@ func (s *codeWikiService) ResumeRun(ctx context.Context, kbID, runID string) err
 	if err := json.Unmarshal(run.ConfigSnapshot, &cfg); err != nil {
 		return fmt.Errorf("decode frozen config: %w", err)
 	}
-	if err := validateCodeWikiRunPolicy(cfg); err != nil {
+	if err := validateCodeWikiExecutionPolicy(cfg); err != nil {
 		return apperrors.NewBadRequestError(err.Error())
 	}
 	if cfg.PublicationGuard != nil && cfg.PublicationGuard.ReviewRequired &&
@@ -595,7 +587,6 @@ func (s *codeWikiService) RetryRun(ctx context.Context, kbID, runID string) (*ty
 // --- Generation worker ------------------------------------------------------
 
 type codeWikiRunState struct {
-	qualifiedSources  map[string]*codefacts.Result
 	captureSource     func(context.Context, codebase.SnapshotScope, string, string, string, *codefacts.Result) error
 	captureInventory  func(context.Context, codebase.SnapshotScope, []string) error
 	modelCallsAtStart int
@@ -630,6 +621,10 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 	}
 	ctx = payload.Initiator.Apply(ctx)
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
+	ctx = types.WithBackgroundTask(ctx)
+	if payload.TopicKey != "" || payload.Dispatch {
+		return s.processCodeWikiTopic(ctx, payload)
+	}
 
 	run, err := s.repo.GetRunByID(ctx, payload.RunID)
 	if err != nil || run.KnowledgeBaseID != payload.KnowledgeBaseID {
@@ -656,19 +651,33 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 	}
 
 	// Crash/cancel safety: never leave a run stuck in a working state.
-	defer s.finalizeRunOnError(ctx, run)
+	dispatched := false
+	defer func() {
+		if !dispatched {
+			s.finalizeRunOnError(ctx, run)
+		}
+	}()
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	defer stopHeartbeat()
 	go s.heartbeatCodeWikiRun(heartbeatCtx, run.ID, owner)
+	workCtx, stopControl := s.watchRunControl(ctx, run, false)
+	defer stopControl()
 
-	if err := s.executeRun(ctx, run, payload); err != nil {
+	err = s.executeRun(workCtx, run, payload)
+	if errors.Is(err, errCodeWikiTopicsDispatched) {
+		// Ownership has transferred to topic workers. A stop racing with this
+		// handoff is settled by their aggregate, never this stale parent copy.
+		dispatched = true
+		return nil
+	}
+	if err := codeWikiExecutionError(workCtx, err); err != nil {
 		// Persist the observed outcome even if the worker's request context
 		// expired. A stopped worker is not evidence of user cancellation.
 		outcomeCtx, cancelOutcome := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelOutcome()
 		switch {
 		case errors.Is(err, errCodeWikiRunCanceled):
-			// User cancellation observed between stages/pages.
+			// User cancellation interrupts an active stage/model request.
 			now := time.Now().UTC()
 			run.Status = types.CodeWikiRunStatusCanceled
 			run.Phase = "已取消"
@@ -687,12 +696,18 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 				run.Phase = "仓库理解与目录规划已暂停，进度已保存，可继续"
 			}
 			if errors.Is(err, errCodeWikiBudgetPaused) {
-				run.Phase = fmt.Sprintf("执行额度已用完，进度已保存（已完成 %d/%d），可继续", run.CompletedPages, run.TotalPages)
+				run.Phase = fmt.Sprintf("本次生成已达到用量上限，进度已保存（已完成 %d/%d），可继续", run.CompletedPages, run.TotalPages)
 				if run.TotalPages == 0 {
-					run.Phase = "执行额度已用完，目录规划进度已保存，可继续"
+					run.Phase = "本次生成已达到用量上限，目录规划进度已保存，可继续"
 				}
 			} else if errors.Is(err, context.DeadlineExceeded) {
 				run.Phase = "执行时间已到，进度已保存，可继续"
+			} else if errors.Is(err, errTopicContext) {
+				run.Phase = errTopicContext.Error()
+			} else if errors.Is(err, errCodeWikiFrontendPlanningStalled) {
+				run.Phase = "目录规划多次未取得新进展，已保存进度，可继续"
+			} else if errors.Is(err, errCodeWikiFrontendPlanningContext) {
+				run.Phase = "目录规划上下文容量不足，进度已保存，请调整生成说明后重新生成"
 			}
 			_ = s.repo.UpdateRun(outcomeCtx, run)
 			s.recordRunEvent(outcomeCtx, run, "paused", run.Phase, nil)
@@ -751,8 +766,19 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 	if err := json.Unmarshal(run.ConfigSnapshot, &cfg); err != nil {
 		return fmt.Errorf("decode frozen config: %w", err)
 	}
-	if err := validateCodeWikiRunPolicy(cfg); err != nil {
+	if err := validateCodeWikiExecutionPolicy(cfg); err != nil {
 		return err
+	}
+	if run.ExecutionEpoch > 0 {
+		state, err := s.loadTopicState(ctx, run, cfg)
+		if err != nil {
+			return err
+		}
+		state.modelCallsAtStart = run.ModelCalls
+		if err := s.startCodeWikiTopics(ctx, state, payload); err != nil {
+			return err
+		}
+		return errCodeWikiTopicsDispatched
 	}
 	state := &codeWikiRunState{
 		run:               run,
@@ -760,16 +786,9 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		builtin:           s.registry.Builtin(),
 		modelCallsAtStart: run.ModelCalls,
 	}
-	factRepo, ok := s.repo.(interfaces.CodeWikiFactRepository)
-	if !ok {
-		return fmt.Errorf("源码事实仓储不可用，不能回退为旧正文生成")
-	}
-	state.captureSource = func(ctx context.Context, scope codebase.SnapshotScope, path, role, reason string, result *codefacts.Result) error {
-		return captureCodeWikiSourceFacts(ctx, factRepo, state, scope, path, role, reason, result)
-	}
-	state.captureInventory = func(ctx context.Context, scope codebase.SnapshotScope, files []string) error {
-		return captureCodeWikiInventory(ctx, factRepo, state, scope, files)
-	}
+	// New execution persists only topic checkpoints and their source locations.
+	// Historical generic fact records remain readable, but are neither populated
+	// nor required by this pipeline. Parser output lives in the bounded cache.
 	state.checkpoint = func(saveCtx context.Context) error {
 		blob, err := json.Marshal(state.cfg)
 		if err != nil {
@@ -914,6 +933,9 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		if err != nil {
 			return err
 		}
+		if len(pages) > 0 && state.cfg.TopicVersion == 1 {
+			pages = append(pages, codeWikiPlannedPage{Slug: types.CodeWikiSummaryTopicKey, Title: "项目概览与阅读导引", Category: "frontend_architecture", CategoryPath: types.StringArray{"架构总览"}, Scope: "复用已完成主题的代码结论，汇总阅读入口与生成缺口", SortOrder: -100})
+		}
 		pagesToGenerate = pages
 		// Freeze the initial write set before any page generation. Subsequent
 		// runs reuse identities and directory metadata from exact stored rows.
@@ -980,6 +1002,12 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 	}
 
 	// Stage: per-page evidence + generation + validation.
+	if state.cfg.TopicVersion == 1 {
+		if err := s.startCodeWikiTopics(ctx, state, payload); err != nil {
+			return err
+		}
+		return errCodeWikiTopicsDispatched
+	}
 	if len(persisted) == 0 {
 		s.setRunPhase(ctx, run, types.CodeWikiRunStatusGenerating, fmt.Sprintf("生成文档（共 %d 页）", len(pages)))
 	}
@@ -1042,9 +1070,10 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 }
 
 var (
-	errCodeWikiRunCanceled  = errors.New("code wiki run canceled")
-	errCodeWikiRunPaused    = errors.New("code wiki run paused")
-	errCodeWikiBudgetPaused = fmt.Errorf("模型调用预算已用完，进度已保留，可继续：%w", errCodeWikiRunPaused)
+	errCodeWikiTopicsDispatched = errors.New("topic execution dispatched")
+	errCodeWikiRunCanceled      = errors.New("code wiki run canceled")
+	errCodeWikiRunPaused        = errors.New("code wiki run paused")
+	errCodeWikiBudgetPaused     = fmt.Errorf("模型调用预算已用完，进度已保留，可继续：%w", errCodeWikiRunPaused)
 )
 
 func (s *codeWikiService) setRunPhase(ctx context.Context, run *types.CodeWikiRun, status, phase string) {
@@ -1209,8 +1238,8 @@ func (s *codeWikiService) analyzeRepositories(ctx context.Context, state *codeWi
 	return out, nil
 }
 
-// Frontend planning reads actual source through a checkpointed tool loop.
-// Legacy versions retain their historical planner for restoring old runs.
+// New frontend plans organize indexed candidates; topic workers verify source.
+// Historical planning implementations remain isolated from this strategy.
 func (s *codeWikiService) planOutline(ctx context.Context, state *codeWikiRunState, summaries map[string]*codeWikiRepoSummary, lang string) ([]codeWikiPlannedPage, error) {
 	if state.cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend &&
 		(state.cfg.FullSourceReanalysis || state.cfg.PublicationGuard == nil || state.cfg.PublicationGuard.BaselineRunID == "") {
@@ -1771,6 +1800,16 @@ var codeWikiCitationRegex = regexp.MustCompile(`\[E(\d+)\]`)
 // line range must be inside the file. Invalid citations block staging; raw
 // candidate text is retained for diagnosis rather than silently deleting proof.
 func (s *codeWikiService) validateCitations(ctx context.Context, state *codeWikiRunState, content string, evidence []types.CodeWikiEvidenceSpec) (string, []string) {
+	valid, problems := s.validateSourceEvidence(ctx, state, evidence)
+	for _, match := range codeWikiCitationRegex.FindAllString(content, -1) {
+		if !valid[match[1:len(match)-1]] {
+			problems = append(problems, "无法核验的引用 "+match)
+		}
+	}
+	return content, problems
+}
+
+func (s *codeWikiService) validateSourceEvidence(ctx context.Context, state *codeWikiRunState, evidence []types.CodeWikiEvidenceSpec) (map[string]bool, []string) {
 	valid := make(map[string]bool, len(evidence))
 	var problems []string
 	for _, spec := range evidence {
@@ -1804,12 +1843,7 @@ func (s *codeWikiService) validateCitations(ctx context.Context, state *codeWiki
 		}
 		valid[spec.ID] = true
 	}
-	for _, match := range codeWikiCitationRegex.FindAllString(content, -1) {
-		if !valid[match[1:len(match)-1]] {
-			problems = append(problems, "无法核验的引用 "+match)
-		}
-	}
-	return content, problems
+	return valid, problems
 }
 
 func contentCitesEvidence(content string, evidence []types.CodeWikiEvidenceSpec) bool {
@@ -1922,6 +1956,9 @@ func (s *codeWikiService) pageBaseline(ctx context.Context, kbID, slug string) (
 // per-run calls do not eliminate account-level 429; this bounds the
 // damage instead of failing the run).
 func (s *codeWikiService) callModel(ctx context.Context, state *codeWikiRunState, prompt string) (string, error) {
+	if err := codeWikiExecutionError(ctx, nil); err != nil {
+		return "", err
+	}
 	if len(prompt) > codeWikiMaxContextChars*2 {
 		return "", fmt.Errorf("generation context exceeds limit; narrow the evidence scope")
 	}
@@ -1932,6 +1969,10 @@ func (s *codeWikiService) callModel(ctx context.Context, state *codeWikiRunState
 	messages := []chat.Message{
 		{Role: "system", Content: policy},
 		{Role: "user", Content: prompt},
+	}
+	output, err := codeWikiContextBudget(state.cfg, messages)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", errCodeWikiRunPaused, err)
 	}
 	var lastErr error
 	for attempt := 0; attempt <= codeWikiMaxRateLimitRetries; attempt++ {
@@ -1945,7 +1986,12 @@ func (s *codeWikiService) callModel(ctx context.Context, state *codeWikiRunState
 		}
 		state.run.ModelCalls++ // Failed requests and retries also consume budget.
 		done := state.beginActivity(ctx, "调用生成模型 · "+state.run.Phase)
-		resp, err := state.chat.Chat(ctx, messages, &chat.ChatOptions{Temperature: 0.2})
+		resp, err := state.chat.Chat(ctx, messages, &chat.ChatOptions{Temperature: 0.2, MaxCompletionTokens: output})
+		err = codeWikiExecutionError(ctx, err)
+		if err == nil && state.interruptCheck != nil {
+			// Close the gap between the last control poll and a model reply.
+			err = state.interruptCheck()
+		}
 		done(err)
 		if err == nil {
 			state.run.TokensUsed += int64(resp.Usage.TotalTokens)
@@ -1965,7 +2011,7 @@ func (s *codeWikiService) callModel(ctx context.Context, state *codeWikiRunState
 		phase := state.run.Phase
 		delay := codeWikiRateLimitDelay(attempt + 1)
 		retryAt := time.Now().UTC().Add(delay)
-		state.run.Phase = "等待模型额度（429 退避中）"
+		state.run.Phase = "请求过于频繁，稍后自动重试"
 		_ = s.repo.UpdateRun(ctx, state.run)
 		s.recordRunEvent(ctx, state.run, "retry", fmt.Sprintf("模型限流，等待第 %d 次重试", attempt+1), &retryAt)
 		if codeWikiSleepRespectingCancel(ctx, delay) {
@@ -2135,6 +2181,11 @@ func codeWikiPageSlug(slug, title string) string {
 }
 
 func readSnapshotFileBounded(snapshotDir, rel string, max int64) string {
+	return strings.TrimSpace(readSnapshotSourceBounded(snapshotDir, rel, max))
+}
+
+// Source evidence must preserve leading/trailing blank lines and indentation.
+func readSnapshotSourceBounded(snapshotDir, rel string, max int64) string {
 	if snapshotDir == "" {
 		return ""
 	}
@@ -2152,7 +2203,7 @@ func readSnapshotFileBounded(snapshotDir, rel string, max int64) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	return string(data)
 }
 
 func readAtMost(f *os.File, max int64) ([]byte, error) {

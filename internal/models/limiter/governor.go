@@ -2,11 +2,53 @@ package limiter
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+var ErrBusy = errors.New("model concurrency slots are busy")
+var ErrUnavailable = errors.New("model concurrency control is unavailable")
+
+type nonBlockingKey struct{}
+
+// WithNonBlocking lets durable tasks requeue instead of holding a worker while
+// waiting. Other background callers keep their existing blocking behavior.
+func WithNonBlocking(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nonBlockingKey{}, true)
+}
+func NonBlocking(ctx context.Context) bool {
+	value, _ := ctx.Value(nonBlockingKey{}).(bool)
+	return value
+}
+
+func TryGateNamedN(ctx context.Context, modelID, modelName string, modelLimit int) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	governorMu.RLock()
+	l, defaultLimit := governor, governorN
+	governorMu.RUnlock()
+	limit := modelLimit
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if l == nil || limit <= 0 || !types.IsBackgroundTask(ctx) {
+		return noop, nil
+	}
+	if named, ok := l.(interface{ SetModelName(string, string) }); ok {
+		named.SetModelName(modelID, modelName)
+	}
+	try, ok := l.(interface {
+		TryAcquire(context.Context, string, int) (func(), error)
+	})
+	if !ok {
+		return nil, ErrUnavailable
+	}
+	return try.TryAcquire(ctx, modelID, limit)
+}
 
 // The concurrency governor is process-wide, shared by every model-client layer
 // that fronts a provider (chat, vlm). Keeping the singleton here — rather than
@@ -143,6 +185,38 @@ func (l *localLimiter) Acquire(ctx context.Context, key string, limit int) (func
 	case <-ctx.Done():
 		// Fail open on cancellation, mirroring the Redis limiter.
 		return noop, nil
+	}
+}
+
+func (l *localLimiter) TryAcquire(ctx context.Context, key string, limit int) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if l == nil || limit <= 0 || key == "" {
+		return noop, nil
+	}
+	l.mu.Lock()
+	sem := l.sems[key]
+	if sem == nil {
+		sem = make(chan struct{}, limit)
+		l.sems[key] = sem
+	}
+	tracked := l.tracked[key]
+	if tracked == nil {
+		tracked = &trackedSemaphore{}
+		l.tracked[key] = tracked
+	}
+	tracked.limit.Store(int64(limit))
+	defer l.mu.Unlock()
+	if len(sem) >= limit {
+		return nil, ErrBusy
+	}
+	select {
+	case sem <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-sem }) }, nil
+	default:
+		return nil, ErrBusy
 	}
 }
 

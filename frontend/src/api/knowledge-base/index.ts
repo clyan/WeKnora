@@ -126,6 +126,7 @@ export function createKnowledgeBase(data: {
     languages?: string[];
     max_pages_per_run?: number;
     max_model_calls_per_run?: number;
+    topic_concurrency?: number;
     run_timeout_minutes?: number;
   };
   indexing_strategy?: {
@@ -166,6 +167,7 @@ export function updateKnowledgeBase(id: string, data: {
       languages?: string[];
       max_pages_per_run?: number;
       max_model_calls_per_run?: number;
+      topic_concurrency?: number;
       run_timeout_minutes?: number;
     };
     auto_tag_config?: { enabled: boolean; model_id?: string; max_tags?: number; skip_if_tagged?: boolean };

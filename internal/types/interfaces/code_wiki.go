@@ -98,6 +98,9 @@ type CodeWikiRepository interface {
 	CreateRun(ctx context.Context, run *types.CodeWikiRun) error
 	// GetRun resolves a run by id within a KB.
 	GetRun(ctx context.Context, kbID, id string) (*types.CodeWikiRun, error)
+	// GetRunControl reads only execution identity and controls, without the
+	// potentially large configuration/planning snapshot, for active watchers.
+	GetRunControl(ctx context.Context, kbID, id string) (*types.CodeWikiRun, error)
 	// GetRunByID resolves a run by id alone (task worker path, which has
 	// already authorized the KB via the payload).
 	GetRunByID(ctx context.Context, id string) (*types.CodeWikiRun, error)

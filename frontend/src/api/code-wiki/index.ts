@@ -117,6 +117,9 @@ export type CodeWikiRunStatus =
   | 'failed' | 'canceled';
 
 export interface CodeWikiRun {
+	 planning_batch?: CodeWikiPlanningBatch;
+	 execution_epoch?: number;
+	 topic_concurrency?: number;
   no_changes?: boolean;
   requires_source_rebuild?: boolean;
   full_source_reanalysis?: boolean;
@@ -139,6 +142,16 @@ export interface CodeWikiRun {
   finished_at?: string | null;
   published_at?: string | null;
   created_at: string;
+}
+
+export interface CodeWikiPlanningBatch {
+  id: string;
+  repository_id: string;
+  repository_name: string;
+  snapshot_id: string;
+  file_count: number;
+  completed: boolean;
+  modules: Array<{ id: string; directory: string; files: string[] }>;
 }
 
 export interface CodeWikiFactRecord {
@@ -177,6 +190,8 @@ export interface CodeWikiRunPage {
 }
 
 export interface CodeWikiRunDetail {
+  topics?: CodeWikiTopic[] | null;
+  progress_revision?: string;
   run: CodeWikiRun;
   manifest: CodeWikiRunRepository[];
   pages: CodeWikiRunPage[] | null;
@@ -201,12 +216,66 @@ export function approveCodeWikiImpact(kbId: string, runId: string, plan_token: s
 }
 
 export interface CodeWikiRunEvent {
+	 topic_key?: string;
+	 attempt_id?: string;
+	 step_id?: string;
   id: number;
   kind: string;
   message: string;
   retry_at?: string;
   created_at: string;
 }
+
+export interface CodeWikiTopic {
+  id: string;
+  topic_key: string;
+  title: string;
+  status: 'queued' | 'running' | 'waiting' | 'paused' | 'failed' | 'completed' | 'superseded';
+  action?: string;
+  revision: number;
+  attempt_id?: string;
+  error_message?: string;
+  updated_at: string;
+}
+
+export const retryCodeWikiTopic = (kbId: string, runId: string, key: string) =>
+  post(`/api/v1/knowledgebase/${kbId}/code-wiki/runs/${runId}/topics/${encodeURIComponent(key)}/retry`);
+
+export interface CodeWikiTopicPage { topics: CodeWikiTopic[]; total: number; counts: Record<string, number>; next_cursor?: string; progress_revision: string }
+export const listCodeWikiTopics = (kb: string, run: string, status = '', cursor = '', limit = 30) =>
+  get<{ success: boolean; data: CodeWikiTopicPage }>(`/api/v1/knowledgebase/${kb}/code-wiki/runs/${run}/topics`, { params: { status, cursor, limit } });
+
+export interface CodeWikiTopicItem {
+  key: string; kind: string; question: string; status: string;
+  conclusion?: string; condition?: string; evidence_ids?: string[];
+  source_node_key?: string;
+  source_topic_key?: string; source_revision?: number; source_item_key?: string;
+  consistency_peer?: { topic_key: string; revision: number; item_key: string };
+  compared_item_key?: string;
+}
+export interface CodeWikiTopicReview {
+  id: string; actor_id: string; analysis_revision: number;
+  kind: string; result: string; note: string; created_at: string;
+}
+export interface CodeWikiTopicDetail {
+  predecessors?: { key: string; revision: number }[];
+  successors?: string[];
+  coverage: { discovered: number; analyzed: number; pending: number; unknown: number; excluded: number; documented: number; validation?: { source: string; citations: string; coverage: string } };
+  topic: CodeWikiTopic;
+  items?: CodeWikiTopicItem[];
+  evidence?: CodeWikiEvidenceSpec[];
+  reviews?: CodeWikiTopicReview[];
+  total: number;
+  next_offset: number | null;
+}
+export const getCodeWikiTopic = (kb: string, run: string, key: string, kind: string, offset = 0) =>
+  get<{ success: boolean; data: CodeWikiTopicDetail }>(`/api/v1/knowledgebase/${kb}/code-wiki/runs/${run}/topics/${encodeURIComponent(key)}`, { params: { kind, offset } });
+export const reviewCodeWikiTopic = (kb: string, run: string, key: string, review: { revision: number; kind: string; result: string; note: string }) =>
+  post(`/api/v1/knowledgebase/${kb}/code-wiki/runs/${run}/topics/${encodeURIComponent(key)}/reviews`, review);
+
+export interface CodeWikiTopicSource { path: string; start_line: number; end_line: number; source: string; next_start: number | null }
+export const getCodeWikiTopicSource = (kb: string, run: string, key: string, evidence: string, start = 0) =>
+  get<{ success: boolean; data: CodeWikiTopicSource }>(`/api/v1/knowledgebase/${kb}/code-wiki/runs/${run}/topics/${encodeURIComponent(key)}/source`, { params: { evidence, start } });
 
 export interface CodeWikiSourceChange {
   repository_id: string;

@@ -293,12 +293,12 @@ type MemoryExtractPayload struct {
 // context.
 type CodeWikiSyncPayload struct {
 	TracingContext
-	TenantID         uint64 `json:"tenant_id"`
-	KnowledgeBaseID  string `json:"knowledge_base_id"`
+	TenantID        uint64 `json:"tenant_id"`
+	KnowledgeBaseID string `json:"knowledge_base_id"`
 	// RepositoryIDs selects specific bindings; empty = every enabled binding.
 	RepositoryIDs []string `json:"repository_ids,omitempty"`
 	// SyncLogID links the run to the data source sync log row.
-	SyncLogID string `json:"sync_log_id,omitempty"`
+	SyncLogID string        `json:"sync_log_id,omitempty"`
 	Initiator TaskInitiator `json:"initiator,omitempty"`
 }
 
@@ -306,10 +306,15 @@ type CodeWikiSyncPayload struct {
 // generation run end-to-end (freeze manifest → analyze → plan → generate →
 // validate → stage).
 type CodeWikiGeneratePayload struct {
+	TopicKey         string `json:"topic_key,omitempty"`
+	Dispatch         bool   `json:"dispatch,omitempty"`
+	ExecutionEpoch   int    `json:"execution_epoch,omitempty"`
+	TopicRevision    int    `json:"topic_revision,omitempty"`
+	DispatchSequence int    `json:"dispatch_sequence,omitempty"`
 	TracingContext
-	TenantID        uint64 `json:"tenant_id"`
-	KnowledgeBaseID string `json:"knowledge_base_id"`
-	RunID           string `json:"run_id"`
+	TenantID        uint64        `json:"tenant_id"`
+	KnowledgeBaseID string        `json:"knowledge_base_id"`
+	RunID           string        `json:"run_id"`
 	Initiator       TaskInitiator `json:"initiator,omitempty"`
 }
 

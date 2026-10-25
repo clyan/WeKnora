@@ -34,6 +34,8 @@ func newCodeWikiTestDB(t *testing.T) *gorm.DB {
 		&types.CodeWikiAnalysisArtifact{},
 		&types.CodeWikiRun{},
 		&types.CodeWikiRunEvent{},
+		&types.CodeWikiTopic{},
+		&types.CodeWikiModelSlot{},
 		&types.CodeWikiRunRepository{},
 		&types.CodeWikiRunPage{},
 		&types.CodeWikiPageEvidence{},

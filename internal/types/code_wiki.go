@@ -90,8 +90,9 @@ const (
 // provider selection lives in code_wiki_analysis_profiles; the version
 // reference below is a denormalized display/freeze pointer only.
 type CodeWikiConfig struct {
-	Mode       string `yaml:"mode,omitempty" json:"mode,omitempty"`
-	TemplateID string `yaml:"template_id,omitempty" json:"template_id,omitempty"`
+	TopicConcurrency int    `yaml:"topic_concurrency,omitempty" json:"topic_concurrency,omitempty"`
+	Mode             string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	TemplateID       string `yaml:"template_id,omitempty" json:"template_id,omitempty"`
 	// Languages hints the analysis and generation prompts (e.g. ["zh"], ["en"]).
 	// Empty = follow request language.
 	Languages []string `yaml:"languages,omitempty" json:"languages,omitempty"`
@@ -113,6 +114,8 @@ type CodeWikiConfig struct {
 
 // Budget/limits defaults for code wiki generation.
 const (
+	DefaultCodeWikiTopicConcurrency  = 3
+	MaxCodeWikiTopicConcurrency      = 8
 	DefaultCodeWikiMaxPagesPerRun    = 60
 	DefaultCodeWikiMaxModelCalls     = 200
 	DefaultCodeWikiRunTimeoutMinutes = 120
@@ -127,6 +130,16 @@ const (
 	// MaxCodeWikiToolMappings bounds the per-profile mapping entries.
 	MaxCodeWikiToolMappings = 24
 )
+
+func (c *CodeWikiConfig) TopicConcurrencyOrDefault() int {
+	if c == nil || c.TopicConcurrency <= 0 {
+		return DefaultCodeWikiTopicConcurrency
+	}
+	if c.TopicConcurrency > MaxCodeWikiTopicConcurrency {
+		return MaxCodeWikiTopicConcurrency
+	}
+	return c.TopicConcurrency
+}
 
 // PagesCapOrDefault returns the effective per-run page cap.
 func (c *CodeWikiConfig) PagesCapOrDefault() int {
@@ -161,6 +174,7 @@ func (c *CodeWikiConfig) Normalize() {
 	if c == nil {
 		return
 	}
+	c.TopicConcurrency = c.TopicConcurrencyOrDefault()
 	if c.Mode == "" {
 		c.Mode = CodeWikiModeProject
 	}
@@ -591,10 +605,15 @@ func IsTerminalCodeWikiRunStatus(status string) bool {
 // publish) or failed/canceled. Exactly one run per KB may be
 // status=published (partial unique index).
 type CodeWikiRun struct {
+	ExecutionEpoch    int        `json:"execution_epoch" gorm:"default:0"`
+	ModelCallLimit    int        `json:"-" gorm:"default:0"`
+	ExecutionDeadline *time.Time `json:"execution_deadline,omitempty"`
+	TopicConcurrency  int        `json:"topic_concurrency" gorm:"default:0"`
 	// NoChanges is response-only: identical published inputs need no new run.
-	NoChanges             bool `json:"no_changes,omitempty" gorm:"-"`
-	RequiresSourceRebuild bool `json:"requires_source_rebuild,omitempty" gorm:"-"`
-	FullSourceReanalysis  bool `json:"full_source_reanalysis,omitempty" gorm:"-"`
+	NoChanges             bool                   `json:"no_changes,omitempty" gorm:"-"`
+	RequiresSourceRebuild bool                   `json:"requires_source_rebuild,omitempty" gorm:"-"`
+	FullSourceReanalysis  bool                   `json:"full_source_reanalysis,omitempty" gorm:"-"`
+	PlanningBatch         *CodeWikiPlanningBatch `json:"planning_batch,omitempty" gorm:"-"`
 	// Unique identifier (UUID)
 	ID              string `json:"id" gorm:"type:varchar(36);primaryKey"`
 	TenantID        uint64 `json:"tenant_id" gorm:"index"`
@@ -906,6 +925,10 @@ var (
 	ErrCodeWikiArtifactNotFound    = errors.New("code wiki analysis artifact not found")
 	ErrCodeWikiProfileNotFound     = errors.New("code wiki analysis profile not found")
 	ErrCodeWikiRunNotFound         = errors.New("code wiki run not found")
+	ErrCodeWikiTopicNotFound       = errors.New("未找到该主题，请刷新任务目录")
+	ErrCodeWikiTopicChanged        = errors.New("主题分析版本已变化，请刷新后再操作")
+	ErrCodeWikiProgressChanged     = errors.New("任务进度已更新，请刷新主题列表后重新翻页")
+	ErrCodeWikiTopicNeedsRecheck   = errors.New("发现公共实现的结论差异，已保存并安排补查")
 	ErrCodeWikiRunNotStaged        = errors.New("code wiki run is not staged")
 	ErrCodeWikiRunActiveExists     = errors.New("another generation run is already active for this knowledge base")
 	ErrCodeWikiNoRepositories      = errors.New("no enabled repositories with ready analysis artifacts")

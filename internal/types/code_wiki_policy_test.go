@@ -28,3 +28,19 @@ func TestCodeWikiModesHaveHistoricalProjectDefault(t *testing.T) {
 	}
 	require.False(t, IsValidCodeWikiMode("frontend"))
 }
+
+func TestCodeWikiTopicConcurrencyDefaultsAndRoundTrips(t *testing.T) {
+	var absent *CodeWikiConfig
+	require.Equal(t, 3, absent.TopicConcurrencyOrDefault())
+	for _, value := range []int{0, -1, 1, 3, 8, 99} {
+		cfg := CodeWikiConfig{TopicConcurrency: value}
+		cfg.Normalize()
+		require.GreaterOrEqual(t, cfg.TopicConcurrency, 1)
+		require.LessOrEqual(t, cfg.TopicConcurrency, 8)
+		blob, err := cfg.Value()
+		require.NoError(t, err)
+		var decoded CodeWikiConfig
+		require.NoError(t, decoded.Scan(blob))
+		require.Equal(t, cfg.TopicConcurrency, decoded.TopicConcurrency)
+	}
+}

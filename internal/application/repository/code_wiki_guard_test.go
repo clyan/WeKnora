@@ -241,7 +241,7 @@ func TestCodeWikiSQLiteIncrementalMigrationRoundTrip(t *testing.T) {
 		require.NoError(t, db.Exec(string(up)).Error)
 		require.True(t, db.Migrator().HasColumn(&types.CodeWikiRunPage{}, "SortOrder"))
 		require.True(t, db.Migrator().HasColumn(&types.CodeWikiRunPage{}, "PlanMetadata"))
-		require.NoError(t, db.Create(&types.CodeWikiRunEvent{KnowledgeBaseID: "kb", RunID: "run", Kind: "phase", Message: "step"}).Error)
+		require.NoError(t, db.Exec("INSERT INTO code_wiki_run_events (knowledge_base_id, run_id, kind, message) VALUES ('kb', 'run', 'phase', 'step')").Error)
 		require.NoError(t, db.Exec(string(down)).Error)
 		require.False(t, db.Migrator().HasTable(&types.CodeWikiRunEvent{}))
 	}

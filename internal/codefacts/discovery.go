@@ -5,14 +5,16 @@ import "strings"
 // Discovery adapters identify syntax to trace, not runtime/business facts.
 // The generic nodes remain available for unknown wrappers and frameworks.
 type Candidate struct {
-	Kind       string     `json:"kind"`
-	Adapter    string     `json:"adapter"`
-	StartLine  int        `json:"start_line"`
-	EndLine    int        `json:"end_line"`
-	Expression string     `json:"expression,omitempty"`
-	Properties []Property `json:"properties,omitempty"`
-	Arguments  []string   `json:"arguments,omitempty"`
-	Unknowns   []string   `json:"unknowns,omitempty"`
+	StartOffset int        `json:"start_offset"`
+	EndOffset   int        `json:"end_offset"`
+	Kind        string     `json:"kind"`
+	Adapter     string     `json:"adapter"`
+	StartLine   int        `json:"start_line"`
+	EndLine     int        `json:"end_line"`
+	Expression  string     `json:"expression,omitempty"`
+	Properties  []Property `json:"properties,omitempty"`
+	Arguments   []string   `json:"arguments,omitempty"`
+	Unknowns    []string   `json:"unknowns,omitempty"`
 }
 
 type Discovery struct {
@@ -26,7 +28,7 @@ func Discover(nodes []Node) Discovery {
 		"动态注册、动态属性、未知请求封装和不可访问依赖尚未解析；不代表全项目覆盖",
 	}}
 	for _, node := range nodes {
-		candidate := Candidate{StartLine: node.StartLine, EndLine: node.EndLine}
+		candidate := Candidate{StartLine: node.StartLine, EndLine: node.EndLine, StartOffset: node.StartOffset, EndOffset: node.EndOffset}
 		switch node.Kind {
 		case "component":
 			for _, property := range node.Properties {

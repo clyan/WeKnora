@@ -91,9 +91,11 @@ export const Screen = ({ status, id }) => status === 1 && <Action disabled={load
 `)
 	require.NoError(t, err)
 	require.Empty(t, result.Diagnostics)
-	var component, call, object bool
+	var component, call, object, exported bool
 	for _, node := range result.Nodes {
 		switch {
+		case node.Kind == "export" && strings.Contains(node.Bindings, "Screen"):
+			exported = true
 		case node.Kind == "component" && node.Name == "Action":
 			component = true
 			require.Equal(t, "Screen", node.Owner)
@@ -109,6 +111,7 @@ export const Screen = ({ status, id }) => status === 1 && <Action disabled={load
 	require.True(t, component)
 	require.True(t, call)
 	require.True(t, object)
+	require.True(t, exported, "direct exported declarations must retain export identity")
 }
 
 func TestAnalyzerMissingNodeReportsRuntimeFailure(t *testing.T) {

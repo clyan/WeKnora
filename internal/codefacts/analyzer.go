@@ -17,7 +17,7 @@ import (
 //go:embed analyzer.cjs
 var analyzerScript string
 
-const Version = "typescript-6.0.3/v1"
+const Version = "typescript-6.0.3/v2"
 
 type Result struct {
 	Version     string       `json:"version"`

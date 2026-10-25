@@ -151,12 +151,19 @@
                       </div>
 
                       <div v-if="isCodeWiki && formData.codeWikiConfig.mode === 'project'" class="form-item">
+                        <label class="form-label">{{ $t('codeWiki.topics.setting') }}</label>
+                        <t-input-number v-model="formData.codeWikiConfig.topicConcurrency" :min="1" :max="8" :step="1" />
+                        <p class="form-tip">{{ $t('codeWiki.topics.settingHint') }}</p>
+                      </div>
+
+                      <div v-if="isCodeWiki && formData.codeWikiConfig.mode === 'project'" class="form-item">
                         <label class="form-label">{{ $t('codeWiki.template.title') }}</label>
                         <p>{{ $t('codeWiki.template.frontend') }}</p>
                         <p class="form-tip">{{ $t('codeWiki.template.description') }}</p>
-                        <t-button variant="outline" size="small" :disabled="!codeWikiTemplate" @click="fillCodeWikiTemplate">
+                        <t-button variant="outline" size="small" :loading="codeWikiTemplateLoading" @click="fillCodeWikiTemplate">
                           {{ $t('codeWiki.template.fill') }}
                         </t-button>
+                        <p v-if="codeWikiTemplateError" class="form-tip">{{ $t('codeWiki.template.loadFailed') }}</p>
                         <p v-if="editorMode === 'edit'" class="form-tip">{{ $t('codeWiki.template.existingHint') }}</p>
                       </div>
 
@@ -707,12 +714,25 @@ const formData = ref<any>(null)
 const isFAQ = computed(() => formData.value?.type === 'faq')
 const isCodeWiki = computed(() => formData.value?.type === 'code_wiki')
 const codeWikiTemplate = ref<CodeWikiTemplate | null>(null)
+const codeWikiTemplateLoading = ref(false)
+const codeWikiTemplateError = ref(false)
+const needsCodeWikiTemplate = computed(() => props.visible && isCodeWiki.value && formData.value?.codeWikiConfig.mode === 'project')
 const loadCodeWikiTemplate = async () => {
+  if (codeWikiTemplate.value || codeWikiTemplateLoading.value) return
+  codeWikiTemplateLoading.value = true
+  codeWikiTemplateError.value = false
   try {
     const result = await getCodeWikiTemplate()
-    if (result.success) codeWikiTemplate.value = result.data
+    if (!result.success || !result.data?.id ||
+        typeof result.data.content_instructions !== 'string' ||
+        typeof result.data.extraction_instructions !== 'string') {
+      throw new Error('Invalid Code Wiki template response')
+    }
+    codeWikiTemplate.value = result.data
   } catch {
-    MessagePlugin.error(t('codeWiki.template.loadFailed'))
+    codeWikiTemplateError.value = true
+  } finally {
+    codeWikiTemplateLoading.value = false
   }
 }
 const applyCodeWikiTemplate = () => {
@@ -721,10 +741,14 @@ const applyCodeWikiTemplate = () => {
   formData.value.wikiConfig.extractionInstructions = codeWikiTemplate.value.extraction_instructions
   formData.value.codeWikiConfig.templateId = codeWikiTemplate.value.id
 }
-const fillCodeWikiTemplate = () => {
+const fillCodeWikiTemplate = async () => {
+  const originalConfig = formData.value?.wikiConfig
+  const hadInstructions = Boolean(originalConfig?.contentInstructions || originalConfig?.extractionInstructions)
+  await loadCodeWikiTemplate()
+  if (!needsCodeWikiTemplate.value || !codeWikiTemplate.value) return
   const config = formData.value?.wikiConfig
-  if (!config) return
-  if (!config.contentInstructions && !config.extractionInstructions) {
+  if (!config || config !== originalConfig) return
+  if (!hadInstructions || (!config.contentInstructions && !config.extractionInstructions)) {
     applyCodeWikiTemplate()
     return
   }
@@ -735,8 +759,11 @@ const fillCodeWikiTemplate = () => {
     onCancel: () => dialog.destroy(),
   })
 }
-watch([isCodeWiki, codeWikiTemplate], () => {
-  if (editorMode.value === 'create' && isCodeWiki.value && formData.value.codeWikiConfig.mode === 'project' &&
+watch(needsCodeWikiTemplate, (needed) => {
+  if (needed) void loadCodeWikiTemplate()
+})
+watch([needsCodeWikiTemplate, codeWikiTemplate], () => {
+  if (editorMode.value === 'create' && needsCodeWikiTemplate.value &&
       !formData.value.wikiConfig.contentInstructions && !formData.value.wikiConfig.extractionInstructions) {
     applyCodeWikiTemplate()
   }
@@ -872,6 +899,7 @@ const initFormData = (type: 'document' | 'faq' | 'code_wiki' = 'document') => {
       templateId: 'frontend_catalog_v1',
       languages: [] as string[],
       maxModelCallsPerRun: 0,
+      topicConcurrency: 3,
       runTimeoutMinutes: 0,
     },
     indexingStrategy: {
@@ -1025,6 +1053,7 @@ const loadKBData = async (
         templateId: kb.code_wiki_config?.template_id || 'frontend_catalog_v1',
         languages: kb.code_wiki_config?.languages || [],
         maxModelCallsPerRun: kb.code_wiki_config?.max_model_calls_per_run || 0,
+        topicConcurrency: kb.code_wiki_config?.topic_concurrency || 3,
         runTimeoutMinutes: kb.code_wiki_config?.run_timeout_minutes || 0,
       },
       indexingStrategy: {
@@ -1406,6 +1435,7 @@ const buildSubmitData = () => {
       template_id: formData.value.codeWikiConfig.mode === 'domain' ? '' : formData.value.codeWikiConfig?.templateId || 'frontend_catalog_v1',
       languages: formData.value.codeWikiConfig?.languages || [],
       max_model_calls_per_run: formData.value.codeWikiConfig?.maxModelCallsPerRun || 0,
+      topic_concurrency: formData.value.codeWikiConfig?.topicConcurrency || 3,
       run_timeout_minutes: formData.value.codeWikiConfig?.runTimeoutMinutes || 0,
     }
   }
@@ -1678,7 +1708,7 @@ watch(() => props.visible, async (newVal) => {
     }
     
     // 加载模型列表与空间默认存储引擎（创建 KB 时即使用，不依赖是否打开「存储引擎」Tab）
-    await Promise.all([loadAllModels(), loadTenantDefaultStorageProvider(), loadCodeWikiTemplate()])
+    await Promise.all([loadAllModels(), loadTenantDefaultStorageProvider()])
 
     if (generation !== kbEditorLoadGeneration || !props.visible) return
     

@@ -255,9 +255,9 @@
             </template>
             <!-- in flight: pause or cancel -->
             <template v-else-if="activeRun.status !== 'publishing'">
-              <t-button variant="outline" size="small" :disabled="!canEdit || actionPending || activeRun.pause_requested"
+              <t-button variant="outline" size="small" :disabled="!canEdit || actionPending || activeRun.pause_requested || activeRun.cancel_requested"
                 @click="pauseActiveRun">{{ activeRun.pause_requested ? $t('codeWiki.workspace.pausing') : $t('codeWiki.runs.pause') }}</t-button>
-              <t-button variant="outline" size="small" :disabled="!canEdit || actionPending"
+              <t-button variant="outline" size="small" :disabled="!canEdit || actionPending || activeRun.cancel_requested"
                 @click="cancelActiveRun">{{ $t('codeWiki.runs.cancel') }}</t-button>
             </template>
           </template>
@@ -293,7 +293,10 @@
         <p v-if="hasIncompletePages && displayedRun.status === 'staged'" class="run-error" role="status">
           {{ $t('codeWiki.workspace.incomplete') }}
         </p>
-        <p v-if="displayedRun.pause_requested && ['pending', 'preparing', 'analyzing', 'planning', 'generating', 'validating'].includes(displayedRun.status)" role="status">
+        <p v-if="displayedRun.cancel_requested && ['pending', 'preparing', 'analyzing', 'planning', 'generating', 'validating'].includes(displayedRun.status)" role="status">
+          {{ $t('codeWiki.runs.cancelRequested') }}
+        </p>
+        <p v-else-if="displayedRun.pause_requested && ['pending', 'preparing', 'analyzing', 'planning', 'generating', 'validating'].includes(displayedRun.status)" role="status">
           {{ $t('codeWiki.runs.pauseRequested') }}
         </p>
         <div v-if="displayedRun.status === 'staged'" class="run-progress-actions">
@@ -313,21 +316,32 @@
         <p v-if="retryEvent && isWorking" class="cw-section-desc" role="status">
           {{ retryEvent.message }} · {{ $t('codeWiki.workspace.retryAt') }}: {{ new Date(retryEvent.retry_at!).toLocaleString() }}
         </p>
-        <p v-if="latestActivity" class="run-current-activity" role="status" aria-live="polite">
+        <CodeWikiTopicProgress v-if="runTopics.length" :topics="runTopics" :events="runEvents"
+          :key="displayedRun.id" :kb="knowledgeBaseId" :run="displayedRun.id"
+          :can-review="canEdit && ['paused', 'staged', 'published'].includes(displayedRun.status)"
+          :limit="displayedRun.topic_concurrency" :working="isWorking"
+          :connected="!connectionLost && !heartbeatStale"
+          :can-retry="canEdit && displayedRun.status === 'paused' && !actionPending"
+          :retrying="retryingTopic" @retry="retryTopic" @preview="openDocumentPreview" />
+        <p v-if="latestActivity && !runTopics.length" class="run-current-activity" role="status" aria-live="polite">
           <t-loading v-if="activityRunning" size="14px" />
           <t-icon v-else :name="latestActivity.kind === 'operation_failed' ? 'error-circle' : 'time'" size="14px" />
           <span>{{ latestActivity.message }}</span>
         </p>
+        <CodeWikiPlanningScope v-if="planningBatch && loadedRunId === displayedRun.id"
+          :key="`${displayedRun.id}:${planningBatch.id}`" :batch="planningBatch"
+          :current="displayedRun.status === 'planning' && !planningBatch.completed" />
         <details v-if="runEvents.length && loadedRunId === displayedRun.id" class="run-manifest" :open="isWorking">
           <summary>{{ $t('codeWiki.workspace.activityHistory') }}</summary>
           <ol class="run-activity-list">
-            <li v-for="event in runEvents" :key="event.id" :class="{ 'run-activity-failed': event.kind === 'operation_failed' }">
-              <t-loading v-if="activityRunning && event.id === latestActivity?.id" size="12px" />
+            <li v-for="event in displayedEvents" :key="event.id" :class="{ 'run-activity-failed': event.kind === 'operation_failed' }">
+              <t-loading v-if="!historyEvents && activityRunning && event.id === latestActivity?.id" size="12px" />
               <t-icon v-else :name="event.kind === 'operation_completed' ? 'check-circle' : event.kind === 'operation_failed' ? 'error-circle' : 'time'" size="12px" />
               <time>{{ new Date(event.created_at).toLocaleTimeString() }}</time>
               <span>{{ event.message }}</span>
             </li>
           </ol>
+          <t-button v-if="historyEvents" variant="text" size="small" @click="historyEvents = null; hasOlderEvents = runEvents.length === 50">{{ $t('codeWiki.workspace.latestEvents') }}</t-button>
           <t-button v-if="hasOlderEvents" variant="text" size="small" :loading="loadingOlderEvents" @click="loadOlderEvents">
             {{ $t('codeWiki.workspace.olderEvents') }}
           </t-button>
@@ -415,7 +429,7 @@
     </SettingDrawer>
 
     <CodeWikiDocumentPreview v-model:visible="documentPreviewVisible" v-model:page-key="selectedPageKey"
-      :pages="runPages" :working="isWorking" :new-pages="impactPlan?.new_pages" />
+      :pages="runPages" :topics="runTopics" :working="isWorking && !connectionLost && !heartbeatStale" :new-pages="impactPlan?.new_pages" />
 
     <t-dialog :visible="!!syncErrorRepository" :header="$t('codeWiki.repositories.errorDetails')"
       :footer="false" width="680px" @close="syncErrorRepository = null">
@@ -449,6 +463,7 @@ import {
   listCodeWikiSourcePages,
   approveCodeWikiImpact,
   exportCodeWikiOKF,
+  retryCodeWikiTopic,
 } from '@/api/code-wiki'
 import type {
   CodeWikiAnalysisProfile, CodeWikiCapabilityReport, CodeWikiRepositoryBinding, CodeWikiRun,
@@ -457,11 +472,15 @@ import type {
   CodeWikiSourceDirectory, CodeWikiSourceEntry,
   CodeWikiSourcePage,
   CodeWikiImpactPlan,
+  CodeWikiTopic,
+  CodeWikiPlanningBatch,
 } from '@/api/code-wiki'
 import { listDataSources } from '@/api/datasource'
 import CodeWikiRepositoryDialog from './CodeWikiRepositoryDialog.vue'
 import CodeWikiDocumentPreview from './CodeWikiDocumentPreview.vue'
 import CodeWikiDocumentTree from './CodeWikiDocumentTree.vue'
+import CodeWikiTopicProgress from './CodeWikiTopicProgress.vue'
+import CodeWikiPlanningScope from './CodeWikiPlanningScope.vue'
 import { buildDocumentTree } from './documentTree'
 import CodeWikiProviderDialog from './CodeWikiProviderDialog.vue'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
@@ -525,6 +544,9 @@ const connectionLost = ref(false)
 const actionPending = ref(false)
 const loadedRunId = ref('')
 const runEvents = ref<CodeWikiRunEvent[]>([])
+const planningBatch = ref<CodeWikiPlanningBatch | null>(null)
+const historyEvents = ref<CodeWikiRunEvent[] | null>(null)
+const displayedEvents = computed(() => historyEvents.value ?? runEvents.value)
 const sourceChanges = ref<CodeWikiSourceChange[]>([])
 const workerHeartbeatAt = ref<string | null>(null)
 const observedAt = ref(Date.now())
@@ -678,22 +700,44 @@ const loadRepositories = async () => {
   }
 }
 
+let runsSeq = 0
 const loadRuns = async () => {
+  const seq = ++runsSeq
+  const kbId = props.knowledgeBaseId
   runsLoading.value = true
   try {
-    const res: any = await listCodeWikiRuns(props.knowledgeBaseId)
-    runs.value = res?.data ?? res ?? []
+    const res: any = await listCodeWikiRuns(kbId)
+    if (seq !== runsSeq || kbId !== props.knowledgeBaseId) return
+    const incoming: CodeWikiRun[] = res?.data ?? res ?? []
+    runs.value = incoming.map(item => {
+      const previous = runs.value.find(run => run.id === item.id)
+      if (previous && ((item.execution_epoch ?? 0) < (previous.execution_epoch ?? 0) || Date.parse(item.updated_at ?? '') < Date.parse(previous.updated_at ?? ''))) return previous
+      return item
+    })
     connectionLost.value = false
   } catch {
-    connectionLost.value = true
+    if (seq === runsSeq && kbId === props.knowledgeBaseId) connectionLost.value = true
   } finally {
-    runsLoading.value = false
+    if (seq === runsSeq) runsLoading.value = false
   }
 }
 
 // Per-page progress for the active run (planned pages appear as pending
 // before generation reaches them; errors carry the per-page reason).
 const runPages = ref<CodeWikiRunPage[]>([])
+const runTopics = ref<CodeWikiTopic[]>([])
+const retryingTopic = ref('')
+const retryTopic = async (key: string) => {
+  const run = displayedRun.value
+  if (!run || retryingTopic.value || !props.canEdit || actionPending.value) return
+  retryingTopic.value = key
+  try {
+    await retryCodeWikiTopic(props.knowledgeBaseId, run.id, key)
+    await loadRuns()
+    await loadRunDetail()
+  } catch (err: any) { MessagePlugin.error(err?.message || t('codeWiki.loadFailed')) }
+  finally { retryingTopic.value = '' }
+}
 const runDocumentTree = computed(() => buildDocumentTree(runPages.value))
 const runManifest = ref<CodeWikiRunRepository[]>([])
 let runDetailSeq = 0
@@ -702,6 +746,7 @@ const loadRunDetail = async () => {
   const run = displayedRun.value
   if (!run) {
     runPages.value = []
+    runTopics.value = []
     runManifest.value = []
     return
   }
@@ -709,24 +754,17 @@ const loadRunDetail = async () => {
     const res: any = await getCodeWikiRun(props.knowledgeBaseId, run.id)
     if (seq !== runDetailSeq || displayedRun.value?.id !== run.id) return
     const detail = res?.data ?? res
+    if (detail?.run?.execution_epoch < (run.execution_epoch ?? 0)) return
+    if (detail?.run?.updated_at && run.updated_at && Date.parse(detail.run.updated_at) < Date.parse(run.updated_at)) return
     runPages.value = detail?.pages ?? []
+    runTopics.value = detail?.topics ?? []
     runManifest.value = detail?.manifest ?? []
+    planningBatch.value = detail?.run?.planning_batch ?? null
     const freshEvents: CodeWikiRunEvent[] = detail?.events ?? []
-    const previous = loadedRunId.value === run.id ? runEvents.value : []
-    // Tool/file operations can produce more than one event page per poll.
-    // Fill the interval before merging so the history has no hidden gaps.
-    let eventPage = freshEvents
-    while (previous[0] && eventPage.length === 50 && eventPage.at(-1)!.id > previous[0].id) {
-      const more: any = await listCodeWikiRunEvents(props.knowledgeBaseId, run.id, eventPage.at(-1)!.id)
-      if (seq !== runDetailSeq || displayedRun.value?.id !== run.id) return
-      const nextPage: CodeWikiRunEvent[] = more?.data ?? more ?? []
-      if (nextPage.length && nextPage[0].id >= eventPage.at(-1)!.id) break
-      eventPage = nextPage
-      freshEvents.push(...eventPage)
-    }
-    if (loadedRunId.value !== run.id) hasOlderEvents.value = eventPage.length === 50
-    const currentEvents = loadedRunId.value === run.id ? runEvents.value : []
-    runEvents.value = [...new Map([...currentEvents, ...freshEvents].map(event => [event.id, event])).values()].sort((a, b) => b.id - a.id)
+    // Poll only the latest page. Older history is a separate, fixed page so
+    // reading it never grows memory or triggers unbounded catch-up requests.
+    runEvents.value = [...new Map(freshEvents.map(event => [event.id, event])).values()].sort((a, b) => b.id - a.id).slice(0, 50)
+    if (!historyEvents.value) hasOlderEvents.value = runEvents.value.length === 50
     sourceChanges.value = detail?.source_changes ?? []
     workerHeartbeatAt.value = detail?.worker_heartbeat_at ?? null
     const incomingPlan: CodeWikiImpactPlan | null = detail?.impact_plan ?? null
@@ -739,20 +777,20 @@ const loadRunDetail = async () => {
     if (detail?.run) runs.value = runs.value.map(item => item.id === run.id ? detail.run : item)
     connectionLost.value = false
   } catch {
-    connectionLost.value = true
+    if (seq === runDetailSeq && displayedRun.value?.id === run.id) connectionLost.value = true
   }
 }
 
 const loadOlderEvents = async () => {
   const runId = loadedRunId.value
-  const before = runEvents.value.at(-1)?.id
+  const before = displayedEvents.value.at(-1)?.id
   if (!runId || !before || loadingOlderEvents.value) return
   loadingOlderEvents.value = true
   try {
     const res: any = await listCodeWikiRunEvents(props.knowledgeBaseId, runId, before)
     if (loadedRunId.value !== runId || displayedRun.value?.id !== runId) return
     const older: CodeWikiRunEvent[] = res?.data ?? res ?? []
-    runEvents.value = [...new Map([...runEvents.value, ...older].map(event => [event.id, event])).values()].sort((a, b) => b.id - a.id)
+    if (older.length) historyEvents.value = [...new Map(older.map(event => [event.id, event])).values()].sort((a, b) => b.id - a.id).slice(0, 50)
     hasOlderEvents.value = older.length === 50
   } catch { MessagePlugin.error(t('codeWiki.loadFailed')) }
   finally { loadingOlderEvents.value = false }
@@ -791,11 +829,14 @@ watch(() => displayedRun.value?.id, () => {
   documentPreviewVisible.value = false
   loadedRunId.value = ''
   runEvents.value = []
+  planningBatch.value = null
+  historyEvents.value = null
   sourceChanges.value = []
   workerHeartbeatAt.value = null
   impactPlan.value = null
   selectedSections.value = {}
   runPages.value = []
+  runTopics.value = []
   runManifest.value = []
   selectedPageKey.value = ''
   loadRunDetail()
@@ -808,6 +849,7 @@ onMounted(() => {
   // Discover work started in another tab and retain observation while the
   // source pane is hidden; never overlap polling batches.
   pollTimer = setInterval(async () => {
+    if (document.hidden) return
     observedAt.value = Date.now()
     const syncing = repositories.value.some((r) => r.status === 'syncing')
     if (!polling) {

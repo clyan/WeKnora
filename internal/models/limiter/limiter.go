@@ -9,12 +9,14 @@
 // lease expiry. Acquire atomically prunes expired leases, counts live holders,
 // and admits a new one only while under the limit. A background heartbeat
 // refreshes the lease so long calls keep their slot; a crashed holder's lease
-// simply expires and is reclaimed. Every backend error fails OPEN (the call is
-// allowed) so a limiter/Redis outage can never halt model traffic.
+// simply expires and is reclaimed. The legacy blocking Acquire fails OPEN on
+// backend errors. Durable tasks use TryAcquire, which returns ErrUnavailable
+// instead so they can save progress and retry without bypassing the limit.
 package limiter
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strconv"
 	"sync"
@@ -161,6 +163,30 @@ func (l *redisLimiter) Acquire(ctx context.Context, key string, limit int) (func
 		case <-timer.C:
 		}
 	}
+}
+
+func (l *redisLimiter) TryAcquire(ctx context.Context, key string, limit int) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if l == nil || l.rdb == nil {
+		return nil, ErrUnavailable
+	}
+	if limit <= 0 || key == "" {
+		return noop, nil
+	}
+	entry, _ := l.tracked.LoadOrStore(key, &trackedSemaphore{})
+	entry.(*trackedSemaphore).limit.Store(int64(limit))
+	token := uuid.NewString()
+	zkey := keyPrefix + key
+	admitted, err := acquireScript.Run(ctx, l.rdb, []string{zkey}, time.Now().UnixMilli(), limit, token, l.ttl.Milliseconds()).Int()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	if admitted != 1 {
+		return nil, ErrBusy
+	}
+	return l.hold(zkey, token), nil
 }
 
 func (l *redisLimiter) RuntimeStats(ctx context.Context) ([]RuntimeStat, error) {

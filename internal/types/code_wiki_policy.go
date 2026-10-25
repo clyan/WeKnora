@@ -5,7 +5,8 @@ const (
 	CodeWikiModeDomain            = "domain"
 	CodeWikiSourcePolicyVersion   = 1
 	CodeWikiFactSchemaVersion     = 1
-	CodeWikiSourceAnalyzerVersion = "typescript-6.0.3/v1"
+	CodeWikiSourceAnalyzerVersion = "typescript-6.0.3/v2"
+	CodeWikiSummaryTopicKey       = "front-project-overview-v1"
 )
 
 func (c *CodeWikiConfig) EffectiveMode() string {

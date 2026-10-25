@@ -14,13 +14,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/agent"
+	"github.com/Tencent/WeKnora/internal/common/tasklease"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
-	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
@@ -380,12 +380,11 @@ type wikiIngestService struct {
 	// for the 5-docs-per-batch fan-out.
 	spanTracker SpanTracker
 	// liteLocks provides per-KB mutual exclusion in Lite mode (no Redis).
-	// Keys are kbID strings; values are unused (presence = locked).
-	liteLocks sync.Map
+	liteLocks tasklease.LocalPool
 	// liteFinalizeLocks is the Lite-mode counterpart of the Redis
 	// wiki:finalize:active:<kbID> lock, keeping two finalize runs for the
 	// same KB from overlapping when there is no Redis.
-	liteFinalizeLocks sync.Map
+	liteFinalizeLocks tasklease.LocalPool
 	// llmRequests coalesces byte-identical concurrent prompts within this
 	// process. Keys include tenant and model to preserve isolation.
 	llmRequests singleflight.Group
@@ -901,20 +900,29 @@ func (s *wikiIngestService) claimPendingList(ctx context.Context, kbID string, l
 // error we fail OPEN (run fn unlocked): a rare lost-update on a shared page
 // is tolerated by the finalize/dead-link passes, whereas silently dropping
 // the update is strictly worse.
-func (s *wikiIngestService) withSlugLock(ctx context.Context, kbID, slug string, fn func() error) (bool, error) {
+func (s *wikiIngestService) withSlugLock(ctx context.Context, kbID, slug string, fn func(context.Context) error) (bool, error) {
 	if s.redisClient == nil {
-		return true, fn()
+		return true, fn(ctx)
 	}
 	key := wikiSlugLockPrefix + kbID + ":" + slug
 	deadline := time.Now().Add(wikiSlugLockWait)
 	for {
-		ok, rerr := s.redisClient.SetNX(ctx, key, "1", wikiSlugLockTTL).Result()
-		if rerr != nil {
-			logger.Warnf(ctx, "wiki reduce: slug lock SetNX failed for %s: %v (running unlocked)", slug, rerr)
-			return true, fn()
+		lease, err := tasklease.Claim(ctx, func(ctx context.Context) (tasklease.Lease, error) {
+			return tasklease.TryObject(ctx, s.redisClient, key, wikiSlugLockTTL)
+		}, wikiSlugLockTTL/3)
+		if err == nil {
+			defer lease.Close()
+			// Renewal loss cancels the callback; compare-token release cannot
+			// delete a replacement reducer's lock.
+			result := fn(lease.Context())
+			return true, errors.Join(result, lease.Close())
 		}
-		if ok {
-			break
+		if !errors.Is(err, tasklease.ErrBusy) {
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			logger.Warnf(ctx, "wiki reduce: slug lock acquisition failed for %s: %v (running unlocked)", slug, err)
+			return true, fn(ctx)
 		}
 		if time.Now().After(deadline) {
 			return false, nil
@@ -925,80 +933,39 @@ func (s *wikiIngestService) withSlugLock(ctx context.Context, kbID, slug string,
 		case <-time.After(wikiSlugLockPoll):
 		}
 	}
-	defer s.redisClient.Del(context.Background(), key)
-	return true, fn()
 }
 
-// wikiInflightReserveScript atomically enforces the per-KB in-flight cap.
-// It purges expired slots (crash recovery), counts live slots, and adds the
-// caller's slot iff under the cap. Returning 1 = reserved, 0 = at cap.
-// Keeping purge+count+add in one Lua call closes the check-then-act race two
-// concurrent reservers would otherwise have.
-const wikiInflightReserveScript = `
-local now = tonumber(ARGV[1])
-local expiry = tonumber(ARGV[2])
-local maxInflight = tonumber(ARGV[3])
-local token = ARGV[4]
-local ttl = tonumber(ARGV[5])
-redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now)
-if redis.call('ZCARD', KEYS[1]) >= maxInflight then
-  return 0
-end
-redis.call('ZADD', KEYS[1], expiry, token)
-redis.call('PEXPIRE', KEYS[1], ttl)
-return 1
-`
-
 // reserveInflightSlot claims one of KB's concurrent-batch slots (Phase 4,
-// standard/Redis mode). Returns (release, true) when granted — release() MUST
-// run when the batch finishes; (nil, false) when the KB is already at
+// standard/Redis mode). Returns (workCtx, release, true) when granted — release()
+// MUST run when the batch finishes; (ctx, nil, false) when the KB is already at
 // maxInflight, so the caller should reschedule and bail. A background renew
 // keeps the slot alive for the batch's duration; a crashed batch's slot simply
 // expires (wikiInflightTTL) and is purged by the next reserver. Lite mode has
 // no shared-pool contention (liteLocks already serialize per KB), so it always
 // grants a no-op slot. Fails OPEN on a Redis error: a blip must not halt wiki
 // generation, and the pool size still bounds total work.
-func (s *wikiIngestService) reserveInflightSlot(ctx context.Context, kbID string, maxInflight int) (func(), bool) {
+func (s *wikiIngestService) reserveInflightSlot(ctx context.Context, kbID string, maxInflight int) (context.Context, func(), bool) {
 	if s.redisClient == nil || maxInflight <= 0 {
-		return func() {}, true
+		return ctx, func() {}, true
 	}
 	key := wikiInflightPrefix + kbID
-	token := uuid.New().String()
-	now := time.Now()
-	res, err := s.redisClient.Eval(ctx, wikiInflightReserveScript,
-		[]string{key},
-		now.UnixMilli(),
-		now.Add(wikiInflightTTL).UnixMilli(),
-		maxInflight,
-		token,
-		wikiInflightTTL.Milliseconds(),
-	).Int()
+	lease, err := tasklease.Claim(ctx, func(ctx context.Context) (tasklease.Lease, error) {
+		return tasklease.TrySlots(ctx, s.redisClient, key, maxInflight, wikiInflightTTL)
+	}, wikiInflightRenew)
+	if errors.Is(err, tasklease.ErrBusy) {
+		return ctx, nil, false
+	}
 	if err != nil {
-		logger.Warnf(ctx, "wiki ingest: inflight reserve failed for KB %s: %v (running uncapped)", kbID, err)
-		return func() {}, true
-	}
-	if res == 0 {
-		return nil, false
-	}
-
-	renewCtx, cancel := context.WithCancel(context.Background())
-	go func() {
-		ticker := time.NewTicker(wikiInflightRenew)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-renewCtx.Done():
-				return
-			case <-ticker.C:
-				exp := float64(time.Now().Add(wikiInflightTTL).UnixMilli())
-				s.redisClient.ZAdd(context.Background(), key, redis.Z{Score: exp, Member: token})
-				s.redisClient.PExpire(context.Background(), key, wikiInflightTTL)
-			}
+		if ctx.Err() != nil {
+			return ctx, nil, false
 		}
-	}()
-	return func() {
-		cancel()
-		s.redisClient.ZRem(context.Background(), key, token)
+		logger.Warnf(ctx, "wiki ingest: inflight reserve failed for KB %s: %v (running uncapped)", kbID, err)
+		return ctx, func() {}, true
+	}
+	return lease.Context(), func() {
+		if err := lease.Close(); err != nil {
+			logger.Warnf(ctx, "wiki ingest: release inflight slot: %v", err)
+		}
 	}, true
 }
 

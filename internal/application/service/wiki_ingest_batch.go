@@ -13,6 +13,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/agent"
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/common/tasklease"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -270,12 +271,18 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	//     nothing.
 	if s.redisClient == nil {
 		mode = "lite"
-		if _, loaded := s.liteLocks.LoadOrStore(payload.KnowledgeBaseID, struct{}{}); loaded {
+		lease, err := tasklease.Claim(ctx, func(ctx context.Context) (tasklease.Lease, error) {
+			return s.liteLocks.TryClaim(ctx, payload.KnowledgeBaseID, 1)
+		}, 0)
+		if errors.Is(err, tasklease.ErrBusy) {
 			exitStatus = "active_lock_conflict"
 			logger.Infof(ctx, "wiki ingest: another batch active for KB %s (lite lock), deferring to asynq retry", payload.KnowledgeBaseID)
 			return ErrWikiIngestConcurrent
 		}
-		defer s.liteLocks.Delete(payload.KnowledgeBaseID)
+		if err != nil {
+			return err
+		}
+		defer lease.Close()
 	}
 
 	kb, err := s.kbService.GetKnowledgeBaseByIDOnly(ctx, payload.KnowledgeBaseID)
@@ -333,7 +340,7 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	// rows stay available for whichever running batch frees a slot first.
 	maxInflight := kb.WikiConfig.IngestMaxInflightOrDefault(wikiInflightDefault)
 	loggedMaxInflight = maxInflight
-	releaseSlot, gotSlot := s.reserveInflightSlot(ctx, payload.KnowledgeBaseID, maxInflight)
+	slotCtx, releaseSlot, gotSlot := s.reserveInflightSlot(ctx, payload.KnowledgeBaseID, maxInflight)
 	if !gotSlot {
 		exitStatus = "inflight_cap"
 		logger.Infof(ctx, "wiki ingest: KB %s at in-flight cap (%d), rescheduling", payload.KnowledgeBaseID, maxInflight)
@@ -341,6 +348,7 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 		return nil
 	}
 	defer releaseSlot()
+	ctx = slotCtx
 
 	// Standard mode claims rows (marks claimed_at, disjoint across concurrent
 	// batches); Lite mode peeks under its in-process lock.
@@ -634,9 +642,9 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 			)
 			// Serialize same-slug read-modify-write across concurrent batches
 			// (standard mode). runs fn directly in Lite mode.
-			acquired, lockErr := s.withSlugLock(reduceCtx, payload.KnowledgeBaseID, slug, func() error {
+			acquired, lockErr := s.withSlugLock(reduceCtx, payload.KnowledgeBaseID, slug, func(lockCtx context.Context) error {
 				changed, affectedType, additionFailed, reduceErr = s.reduceSlugUpdates(
-					reduceCtx, chatModel, payload.KnowledgeBaseID, slug, updates, payload.TenantID, batchCtx, kidToWikiSpan)
+					lockCtx, chatModel, payload.KnowledgeBaseID, slug, updates, payload.TenantID, batchCtx, kidToWikiSpan)
 				return reduceErr
 			})
 			if lockErr != nil {
@@ -931,45 +939,28 @@ func (s *wikiIngestService) ProcessWikiFinalize(ctx context.Context, t *asynq.Ta
 	// and ingest batches never block each other. Coalescing via asynq.TaskID
 	// already keeps at most one finalize pending per KB; this guards the
 	// reschedule-overlap window against a concurrent index-page write.
-	if s.redisClient != nil {
-		key := "wiki:finalize:active:" + payload.KnowledgeBaseID
-		acquired, err := s.redisClient.SetNX(ctx, key, "1", wikiFinalizeLockTTL).Result()
-		if err != nil {
-			// Fail CLOSED: proceeding unlocked would let two finalize runs
-			// drain the same PeekBatch rows and double-rebuild the index page
-			// (GetPage→modify→UpdatePage lost update). Return an error so
-			// asynq retries the (coalesced) finalize once Redis recovers,
-			// instead of racing a concurrent finalize.
-			logger.Warnf(ctx, "wiki finalize: SetNX failed for KB %s: %v (retrying)", payload.KnowledgeBaseID, err)
-			return fmt.Errorf("wiki finalize: acquire lock: %w", err)
-		} else if !acquired {
-			// Another finalize is running; it will drain the lane and
-			// reschedule if rows remain. Safe to no-op.
-			return nil
-		}
-		lockCtx, cancelLock := context.WithCancel(context.Background())
-		defer func() {
-			cancelLock()
-			s.redisClient.Del(context.Background(), key)
-		}()
-		go func() {
-			ticker := time.NewTicker(wikiFinalizeLockRenew)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-lockCtx.Done():
-					return
-				case <-ticker.C:
-					s.redisClient.Expire(context.Background(), key, wikiFinalizeLockTTL)
-				}
-			}
-		}()
-	} else {
-		if _, loaded := s.liteFinalizeLocks.LoadOrStore(payload.KnowledgeBaseID, struct{}{}); loaded {
-			return nil
-		}
-		defer s.liteFinalizeLocks.Delete(payload.KnowledgeBaseID)
+	renewInterval := wikiFinalizeLockRenew
+	if s.redisClient == nil {
+		renewInterval = 0
 	}
+	lease, err := tasklease.Claim(ctx, func(ctx context.Context) (tasklease.Lease, error) {
+		if s.redisClient == nil {
+			return s.liteFinalizeLocks.TryClaim(ctx, payload.KnowledgeBaseID, 1)
+		}
+		return tasklease.TryObject(ctx, s.redisClient, "wiki:finalize:active:"+payload.KnowledgeBaseID, wikiFinalizeLockTTL)
+	}, renewInterval)
+	if errors.Is(err, tasklease.ErrBusy) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("wiki finalize: acquire lock: %w", err)
+	}
+	defer func() {
+		if err := lease.Close(); err != nil {
+			logger.Warnf(ctx, "wiki finalize: release lock: %v", err)
+		}
+	}()
+	ctx = lease.Context()
 
 	rows, err := s.pendingRepo.PeekBatch(ctx, wikiFinalizeTaskType, wikiTaskScope, payload.KnowledgeBaseID, wikiFinalizeMaxRows)
 	if err != nil {
