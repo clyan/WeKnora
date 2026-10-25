@@ -1,4 +1,13 @@
-import { get, post, put, patch, del } from '../../utils/request';
+import { get, getDown, post, put, patch, del } from '../../utils/request';
+
+export interface CodeWikiTemplate {
+  id: string;
+  content_instructions: string;
+  extraction_instructions: string;
+}
+
+export const getCodeWikiTemplate = () => get<{ success: boolean; data: CodeWikiTemplate }>('/api/v1/code-wiki/templates');
+export const exportCodeWikiOKF = (kbId: string) => getDown(`/api/v1/knowledgebase/${kbId}/code-wiki/export/okf`);
 
 // Code Wiki 管理 API。
 // 一个 code_wiki 知识库对应一个项目的多个 GitLab 仓库；分析由可替换的
@@ -140,6 +149,8 @@ export interface CodeWikiRunPage {
   title: string;
   page_type: string;
   category: string;
+  category_path?: string[] | null;
+  sort_order?: number;
   content: string;
   summary: string;
   evidence?: CodeWikiEvidenceSpec[] | null;

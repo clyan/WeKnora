@@ -21,6 +21,9 @@ func (s *codeWikiService) ApproveRunImpact(ctx context.Context, kbID, runID stri
 		return err
 	}
 	guard := cfg.PublicationGuard
+	if cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend && !cfg.FrontendPlanReady {
+		return fmt.Errorf("knowledge planning is incomplete; resume planning before reviewing impact")
+	}
 	if guard == nil || !guard.ReviewRequired || run.Status != types.CodeWikiRunStatusPaused || guard.PlanToken != req.PlanToken {
 		return fmt.Errorf("run is not awaiting this impact plan")
 	}

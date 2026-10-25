@@ -3472,6 +3472,17 @@ export default {
     attachmentStillProcessing: '附件 {name} 仍在解析，请稍候'
   },
   codeWiki: {
+    template: {
+      title: '知识组织模板',
+      frontend: '前端代码知识目录',
+      description: '阅读仓库实际代码后规划页面、接口、组件、架构与流程，自动分批分析，支持 OKF 导出。缺失证据会明确标注，不推断后端实现。',
+      fill: '填充 / 恢复模板默认要求',
+      replaceConfirm: '用模板默认要求替换当前的内容要求和提取要求？',
+      existingHint: '新任务采用前端目录；旧发布目录不能混合生成。',
+      loadFailed: '默认模板加载失败，请重新打开设置重试。',
+      export: '导出 OKF',
+      exportFailed: '导出失败，请先发布知识文档后重试。',
+    },
     workspace: {
       documentPreview: '文档预览',
       candidateDocuments: '本次文档',

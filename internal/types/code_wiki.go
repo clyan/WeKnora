@@ -90,16 +90,18 @@ const (
 // provider selection lives in code_wiki_analysis_profiles; the version
 // reference below is a denormalized display/freeze pointer only.
 type CodeWikiConfig struct {
+	TemplateID string `yaml:"template_id,omitempty" json:"template_id,omitempty"`
 	// Languages hints the analysis and generation prompts (e.g. ["zh"], ["en"]).
 	// Empty = follow request language.
 	Languages []string `yaml:"languages,omitempty" json:"languages,omitempty"`
-	// MaxPagesPerRun caps how many pages one generation run may produce.
-	// 0 falls back to DefaultCodeWikiMaxPagesPerRun.
+	// MaxPagesPerRun is retained for historical run configuration only.
+	// Frontend knowledge planning ignores it; document count follows the source.
 	MaxPagesPerRun int `yaml:"max_pages_per_run,omitempty" json:"max_pages_per_run,omitempty"`
-	// MaxModelCallsPerRun caps total LLM calls per run (budget guard).
+	// MaxModelCallsPerRun bounds calls in one worker pass (budget guard).
+	// Reaching it pauses with checkpoints; continuing preserves cumulative usage.
 	// 0 falls back to DefaultCodeWikiMaxModelCalls.
 	MaxModelCallsPerRun int `yaml:"max_model_calls_per_run,omitempty" json:"max_model_calls_per_run,omitempty"`
-	// RunTimeoutMinutes bounds one generation run. 0 falls back to
+	// RunTimeoutMinutes bounds one worker pass. 0 falls back to
 	// DefaultCodeWikiRunTimeoutMinutes.
 	RunTimeoutMinutes int `yaml:"run_timeout_minutes,omitempty" json:"run_timeout_minutes,omitempty"`
 	// AnalysisProfileVersion mirrors the current analysis profile's
@@ -133,7 +135,7 @@ func (c *CodeWikiConfig) PagesCapOrDefault() int {
 	return c.MaxPagesPerRun
 }
 
-// ModelCallsCapOrDefault returns the effective per-run model call cap.
+// ModelCallsCapOrDefault returns the effective worker-pass model call cap.
 func (c *CodeWikiConfig) ModelCallsCapOrDefault() int {
 	if c == nil || c.MaxModelCallsPerRun <= 0 {
 		return DefaultCodeWikiMaxModelCalls
@@ -157,6 +159,9 @@ func (c *CodeWikiConfig) TimeoutOrDefault() time.Duration {
 func (c *CodeWikiConfig) Normalize() {
 	if c == nil {
 		return
+	}
+	if c.TemplateID == "" {
+		c.TemplateID = CodeWikiFrontendTemplate
 	}
 	if c.MaxPagesPerRun > MaxCodeWikiPagesPerRunHardCap {
 		c.MaxPagesPerRun = MaxCodeWikiPagesPerRunHardCap
@@ -748,6 +753,9 @@ const (
 
 // IsValidCodeWikiPageCategory reports whether category is known.
 func IsValidCodeWikiPageCategory(category string) bool {
+	if IsCodeWikiFrontendCategory(category) {
+		return true
+	}
 	switch category {
 	case CodeWikiPageCategoryOverview, CodeWikiPageCategoryArchitecture,
 		CodeWikiPageCategoryInteraction, CodeWikiPageCategoryWorkflow,

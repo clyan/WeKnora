@@ -38,10 +38,14 @@ import (
 // creation and is the ONLY source of generation inputs for the worker — a
 // later config edit cannot change what an in-flight run produces.
 type codeWikiRunConfig struct {
+	FrontendPlannerVersion int                                      `json:"frontend_planner_version,omitempty"`
+	FrontendPlanReady      bool                                     `json:"frontend_plan_ready,omitempty"`
+	FrontendPlanning       *codeWikiFrontendPlanning                `json:"frontend_planning,omitempty"`
 	SnapshotReferences     map[string]types.CodeWikiFrozenReference `json:"snapshot_references,omitempty"`
 	PublicationGuard       *types.CodeWikiPublicationGuard          `json:"publication_guard,omitempty"`
 	SourceChanges          []types.CodeWikiSourceChange             `json:"source_changes,omitempty"`
 	DirectoryVersion       int                                      `json:"directory_version,omitempty"`
+	TemplateID             string                                   `json:"template_id,omitempty"`
 	Languages              []string                                 `json:"languages,omitempty"`
 	ContentInstructions    string                                   `json:"content_instructions,omitempty"`
 	ExtractionInstructions string                                   `json:"extraction_instructions,omitempty"`
@@ -62,20 +66,21 @@ type codeWikiFrozenProvider struct {
 }
 
 type codeWikiPlannedPage struct {
-	Summary         string            `json:"-"`
-	SortOrder       int               `json:"-"`
-	RepositoryID    string            `json:"repository_id,omitempty"`
-	InstanceKind    string            `json:"instance_kind,omitempty"`
-	Domain          string            `json:"domain,omitempty"`
-	SourcePaths     []string          `json:"source_paths,omitempty"`
-	PageType        string            `json:"-"`
-	BaselineVersion int               `json:"-"`
-	BaselineSource  string            `json:"-"`
-	CategoryPath    types.StringArray `json:"-"`
-	Slug            string            `json:"slug"`
-	Title           string            `json:"title"`
-	Category        string            `json:"category"`
-	Scope           string            `json:"scope"`
+	SourceSpans     []codeWikiSourceSpan `json:"source_spans,omitempty"`
+	Summary         string               `json:"-"`
+	SortOrder       int                  `json:"-"`
+	RepositoryID    string               `json:"repository_id,omitempty"`
+	InstanceKind    string               `json:"instance_kind,omitempty"`
+	Domain          string               `json:"domain,omitempty"`
+	SourcePaths     []string             `json:"source_paths,omitempty"`
+	PageType        string               `json:"-"`
+	BaselineVersion int                  `json:"-"`
+	BaselineSource  string               `json:"-"`
+	CategoryPath    types.StringArray    `json:"-"`
+	Slug            string               `json:"slug"`
+	Title           string               `json:"title"`
+	Category        string               `json:"category"`
+	Scope           string               `json:"scope"`
 }
 
 const (
@@ -190,18 +195,23 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 	if cfg == nil {
 		cfg = &types.CodeWikiConfig{}
 	}
+	if cfg.TemplateID != "" && cfg.TemplateID != types.CodeWikiFrontendTemplate {
+		return nil, apperrors.NewBadRequestError("unsupported code wiki template")
+	}
 	var contentInstructions, extractionInstructions string
 	if kb.WikiConfig != nil {
 		contentInstructions = kb.WikiConfig.ContentInstructions
 		extractionInstructions = kb.WikiConfig.ExtractionInstructions
 	}
 	frozen := codeWikiRunConfig{
+		FrontendPlannerVersion: 1,
 		SnapshotReferences:     references,
-		DirectoryVersion:       types.CodeWikiDirectoryVersionV1,
+		DirectoryVersion:       types.CodeWikiDirectoryVersionFrontend,
+		TemplateID:             types.CodeWikiFrontendTemplate,
 		Languages:              cfg.Languages,
 		ContentInstructions:    contentInstructions,
 		ExtractionInstructions: extractionInstructions,
-		MaxPages:               cfg.PagesCapOrDefault(),
+		MaxPages:               0, // No document-count limit for frontend planning.
 		MaxModelCalls:          cfg.ModelCallsCapOrDefault(),
 		TimeoutMinutes:         int(cfg.TimeoutOrDefault().Minutes()),
 		Provider: codeWikiFrozenProvider{
@@ -210,6 +220,12 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 			SnapshotDelivery: profile.SnapshotDelivery,
 			SharedRoot:       profile.SharedRoot,
 		},
+	}
+	if frozen.ContentInstructions == "" {
+		frozen.ContentInstructions = types.CodeWikiFrontendContentInstructions
+	}
+	if frozen.ExtractionInstructions == "" {
+		frozen.ExtractionInstructions = types.CodeWikiFrontendExtractionInstructions
 	}
 	// Existing published directories need an explicit migration. Repeated
 	// generation must not silently switch an older project to the new tree.
@@ -222,7 +238,9 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 		if err := json.Unmarshal(published.ConfigSnapshot, &prior); err != nil {
 			return nil, apperrors.NewBadRequestError("published generation config is unavailable; verify the directory baseline first")
 		}
-		frozen.DirectoryVersion = prior.DirectoryVersion
+		if prior.DirectoryVersion != types.CodeWikiDirectoryVersionFrontend {
+			return nil, apperrors.NewBadRequestError("旧目录不能与前端知识目录混合生成；请使用新的代码知识库")
+		}
 	}
 	if frozen.Provider.Kind == "" {
 		frozen.Provider.Kind = types.CodeWikiProviderBuiltin
@@ -504,17 +522,17 @@ func (s *codeWikiService) ResumeRun(ctx context.Context, kbID, runID string) err
 	if run.Status != types.CodeWikiRunStatusPaused {
 		return apperrors.NewBadRequestError("run is not paused")
 	}
-	// Clear the pause flag BEFORE enqueueing so the worker does not observe
-	// its own pause request on the resumed pass.
-	if err := s.repo.RequestRunControl(ctx, kbID, runID, "resume"); err != nil {
-		return err
-	}
 	var cfg codeWikiRunConfig
 	if err := json.Unmarshal(run.ConfigSnapshot, &cfg); err != nil {
 		return fmt.Errorf("decode frozen config: %w", err)
 	}
-	if cfg.PublicationGuard != nil && cfg.PublicationGuard.ReviewRequired {
+	if cfg.PublicationGuard != nil && cfg.PublicationGuard.ReviewRequired &&
+		(cfg.DirectoryVersion != types.CodeWikiDirectoryVersionFrontend || cfg.FrontendPlanReady) {
 		return apperrors.NewBadRequestError("review the joint impact plan before resuming")
+	}
+	// Only clear the flag after validation, immediately before enqueueing.
+	if err := s.repo.RequestRunControl(ctx, kbID, runID, "resume"); err != nil {
+		return err
 	}
 	timeout := time.Duration(cfg.TimeoutMinutes) * time.Minute
 	if timeout <= 0 {
@@ -542,12 +560,14 @@ func (s *codeWikiService) RetryRun(ctx context.Context, kbID, runID string) (*ty
 // --- Generation worker ------------------------------------------------------
 
 type codeWikiRunState struct {
-	activity func(context.Context, string, string)
-	run      *types.CodeWikiRun
-	cfg      codeWikiRunConfig
-	provider codebase.CodeAnalysisProvider
-	builtin  *codebase.BuiltinProvider
-	chat     chat.Chat
+	modelCallsAtStart int
+	checkpoint        func(context.Context) error
+	activity          func(context.Context, string, string)
+	run               *types.CodeWikiRun
+	cfg               codeWikiRunConfig
+	provider          codebase.CodeAnalysisProvider
+	builtin           *codebase.BuiltinProvider
+	chat              chat.Chat
 	// included repositories keyed by repository id
 	scopes map[string]codebase.SnapshotScope
 	// display name per repository id, for prompts and evidence rendering
@@ -620,11 +640,22 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 			s.recordRunEvent(outcomeCtx, run, "canceled", run.Phase, nil)
 			logger.Infof(ctx, "code wiki generate: run %s canceled by user", run.ID)
 			return nil
-		case errors.Is(err, errCodeWikiRunPaused):
+		case errors.Is(err, errCodeWikiRunPaused), errors.Is(err, context.DeadlineExceeded):
 			// User pause observed between pages: the plan and completed pages
 			// persist; resume re-leases the run and continues.
 			run.Status = types.CodeWikiRunStatusPaused
 			run.Phase = fmt.Sprintf("已暂停（已完成 %d/%d 页），可继续", run.CompletedPages, run.TotalPages)
+			if run.TotalPages == 0 {
+				run.Phase = "仓库理解与目录规划已暂停，进度已保存，可继续"
+			}
+			if errors.Is(err, errCodeWikiBudgetPaused) {
+				run.Phase = fmt.Sprintf("执行额度已用完，进度已保存（已完成 %d/%d），可继续", run.CompletedPages, run.TotalPages)
+				if run.TotalPages == 0 {
+					run.Phase = "执行额度已用完，目录规划进度已保存，可继续"
+				}
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				run.Phase = "执行时间已到，进度已保存，可继续"
+			}
 			_ = s.repo.UpdateRun(outcomeCtx, run)
 			s.recordRunEvent(outcomeCtx, run, "paused", run.Phase, nil)
 			logger.Infof(ctx, "code wiki generate: run %s paused by user (%d/%d pages)",
@@ -683,9 +714,18 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		return fmt.Errorf("decode frozen config: %w", err)
 	}
 	state := &codeWikiRunState{
-		run:     run,
-		cfg:     cfg,
-		builtin: s.registry.Builtin(),
+		run:               run,
+		cfg:               cfg,
+		builtin:           s.registry.Builtin(),
+		modelCallsAtStart: run.ModelCalls,
+	}
+	state.checkpoint = func(saveCtx context.Context) error {
+		blob, err := json.Marshal(state.cfg)
+		if err != nil {
+			return err
+		}
+		run.ConfigSnapshot = types.JSON(blob)
+		return s.repo.UpdateRun(saveCtx, run)
 	}
 	state.activity = func(eventCtx context.Context, kind, message string) {
 		s.recordRunEvent(eventCtx, run, kind, message, nil)
@@ -794,7 +834,7 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 	if err != nil {
 		return err
 	}
-	if len(persisted) > 0 {
+	if len(persisted) > 0 && (cfg.DirectoryVersion != types.CodeWikiDirectoryVersionFrontend || cfg.FrontendPlanReady) {
 		// Resume: staged results from the earlier pass are kept as-is; only
 		// pending pages still need generation.
 		for _, p := range persisted {
@@ -814,7 +854,7 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		s.setRunPhase(ctx, run, types.CodeWikiRunStatusGenerating,
 			fmt.Sprintf("继续生成（剩余 %d/%d 页）", len(pagesToGenerate), len(pages)))
 	} else {
-		s.setRunPhase(ctx, run, types.CodeWikiRunStatusPlanning, "规划文档目录")
+		s.setRunPhase(ctx, run, types.CodeWikiRunStatusPlanning, "理解仓库并规划知识目录")
 		pages, err = s.planOutline(ctx, state, repoSummaries, lang)
 		if err != nil {
 			return err
@@ -860,6 +900,12 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		if err := s.persistPlannedPages(ctx, run, pages); err != nil {
 			return err
 		}
+		if cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend {
+			state.cfg.FrontendPlanReady = true
+			if err := state.checkpoint(ctx); err != nil {
+				return err
+			}
+		}
 	}
 	state.pages = pages
 	run.TotalPages = len(pages)
@@ -894,11 +940,10 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 			}
 			continue
 		}
-		if run.ModelCalls >= cfg.MaxModelCalls {
-			run.Phase = "已达到本轮模型调用上限，剩余页面跳过"
-			_ = s.repo.UpdateRun(ctx, run)
-			break
+		if state.modelBudgetExhausted() {
+			return errCodeWikiBudgetPaused
 		}
+		s.setRunPhase(ctx, run, types.CodeWikiRunStatusGenerating, fmt.Sprintf("生成文档（已完成 %d/%d）· %s", run.CompletedPages, len(pages), page.Title))
 		if err := s.generateOnePage(ctx, state, page, repoSummaries, lang); err != nil {
 			return err
 		}
@@ -940,8 +985,9 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 }
 
 var (
-	errCodeWikiRunCanceled = errors.New("code wiki run canceled")
-	errCodeWikiRunPaused   = errors.New("code wiki run paused")
+	errCodeWikiRunCanceled  = errors.New("code wiki run canceled")
+	errCodeWikiRunPaused    = errors.New("code wiki run paused")
+	errCodeWikiBudgetPaused = fmt.Errorf("模型调用预算已用完，进度已保留，可继续：%w", errCodeWikiRunPaused)
 )
 
 func (s *codeWikiService) setRunPhase(ctx context.Context, run *types.CodeWikiRun, status, phase string) {
@@ -1098,9 +1144,13 @@ func (s *codeWikiService) analyzeRepositories(ctx context.Context, state *codeWi
 	return out, nil
 }
 
-// planOutline asks the model for the page list; a model failure degrades to
-// the default outline rather than failing the run.
+// Frontend planning reads actual source through a checkpointed tool loop.
+// Legacy versions retain their historical planner for restoring old runs.
 func (s *codeWikiService) planOutline(ctx context.Context, state *codeWikiRunState, summaries map[string]*codeWikiRepoSummary, lang string) ([]codeWikiPlannedPage, error) {
+	if state.cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend &&
+		(state.cfg.PublicationGuard == nil || state.cfg.PublicationGuard.BaselineRunID == "") {
+		return s.planFrontendCatalog(ctx, state, summaries, lang)
+	}
 	if guard := state.cfg.PublicationGuard; guard != nil && guard.BaselineRunID != "" {
 		prior, err := s.repo.ListRunPages(ctx, guard.BaselineRunID)
 		if err != nil {
@@ -1137,7 +1187,7 @@ func (s *codeWikiService) planOutline(ctx context.Context, state *codeWikiRunSta
 		if len(pages) == 0 {
 			return nil, fmt.Errorf("published directory baseline has no reusable pages")
 		}
-		if len(pages) > state.cfg.MaxPages {
+		if state.cfg.DirectoryVersion != types.CodeWikiDirectoryVersionFrontend && len(pages) > state.cfg.MaxPages {
 			return nil, fmt.Errorf("page cap cannot truncate a published directory")
 		}
 		return s.discoverCodeWikiAdditions(ctx, state, pages, summaries, lang)
@@ -1320,17 +1370,12 @@ func (s *codeWikiService) generateOnePage(ctx context.Context, state *codeWikiRu
 	s.setRunPhase(ctx, run, types.CodeWikiRunStatusGenerating, "生成正文："+page.Title)
 	_ = s.repo.UpdateRunPageProgress(ctx, run.ID, page.Slug, "generating")
 	evidenceBlock := renderCodeWikiEvidence(state, evidence)
-	neighborSlugs := make([]string, 0, len(state.pages))
-	for _, p := range state.pages {
-		if p.Slug != page.Slug {
-			neighborSlugs = append(neighborSlugs, p.Slug)
-		}
-	}
+	neighbors := codeWikiNeighborContext(state.pages, page)
 	prompt := strings.NewReplacer(
 		"{{.PageTitle}}", page.Title,
 		"{{.Category}}", page.Category,
 		"{{.Scope}}", page.Scope,
-		"{{.ProjectContext}}", strings.Join(append(state.manifest, "pages: "+strings.Join(neighborSlugs, ", ")), "\n"),
+		"{{.ProjectContext}}", strings.Join(append(append([]string(nil), state.manifest...), "related page sample:\n"+neighbors), "\n"),
 		"{{.Evidence}}", evidenceBlock,
 		"{{.ContentInstructions}}", orDefault(state.cfg.ContentInstructions, "清晰、面向工程师，先结论后细节"),
 		"{{.KnownLimits}}", codeWikiKnownLimits(state),
@@ -1339,10 +1384,14 @@ func (s *codeWikiService) generateOnePage(ctx context.Context, state *codeWikiRu
 	if state.cfg.DirectoryVersion == types.CodeWikiDirectoryVersionV1 {
 		prompt += "\nThis wiki is for technical staff and documents current evidenced implementation. Only supplied source repositories may be analyzed. For third-party dependencies without supplied source, describe declarations and call sites only; do not infer internals. Functional-chain pages must name real evidenced UI/route/action or API/task/message/CLI entry points, linked implementation, state changes, error paths and explicit unknown boundaries."
 	}
+	if state.cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend {
+		prompt += "\n" + frontendPageInstructions(page.Category) + "\n" + state.cfg.ExtractionInstructions
+		prompt += "\nRelated page IDs are a bounded navigation sample, not the complete knowledge inventory. Supplied source excerpts are bounded; do not claim complete source or behavior coverage."
+	}
 
 	content, err := s.callModel(ctx, state, prompt)
 	if err != nil {
-		if errors.Is(err, errCodeWikiRunPaused) || errors.Is(err, errCodeWikiRunCanceled) {
+		if errors.Is(err, errCodeWikiRunPaused) || errors.Is(err, errCodeWikiRunCanceled) || ctx.Err() != nil {
 			return err
 		}
 		run.FailedPages++
@@ -1370,12 +1419,48 @@ func (s *codeWikiService) generateOnePage(ctx context.Context, state *codeWikiRu
 	return nil
 }
 
+func codeWikiNeighborContext(pages []codeWikiPlannedPage, current codeWikiPlannedPage) string {
+	ordered := append([]codeWikiPlannedPage(nil), pages...)
+	anchors := map[string]bool{}
+	for _, name := range current.SourcePaths {
+		anchors[name] = true
+	}
+	score := func(page codeWikiPlannedPage) int {
+		if page.RepositoryID != current.RepositoryID {
+			return 0
+		}
+		for _, name := range page.SourcePaths {
+			if anchors[name] {
+				return 2
+			}
+		}
+		return 1
+	}
+	sort.SliceStable(ordered, func(i, j int) bool { return score(ordered[i]) > score(ordered[j]) })
+	var lines []string
+	size := 0
+	for _, page := range ordered {
+		if page.Slug == current.Slug {
+			continue
+		}
+		line := fmt.Sprintf("%s | %s | %s", page.Slug, page.Title, page.Category)
+		if size+len(line)+1 > 4000 {
+			break
+		}
+		lines = append(lines, line)
+		size += len(line) + 1
+	}
+	return strings.Join(lines, "\n")
+}
+
 // retrieveEvidence runs bounded, scoped searches across the run's frozen
 // repositories and assembles the pre-assigned evidence list.
 func (s *codeWikiService) retrieveEvidence(ctx context.Context, state *codeWikiRunState, page codeWikiPlannedPage) []types.CodeWikiEvidenceSpec {
 	queries := codeWikiEvidenceQueries(page)
 	var specs []types.CodeWikiEvidenceSpec
-	if scope, ok := state.scopes[page.RepositoryID]; ok {
+	if state.cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend {
+		specs = s.frontendAnchorEvidence(ctx, state, page)
+	} else if scope, ok := state.scopes[page.RepositoryID]; ok {
 		for _, path := range page.SourcePaths {
 			if len(specs) >= codeWikiMaxEvidencePerPage/2 {
 				break
@@ -1405,7 +1490,7 @@ func (s *codeWikiService) retrieveEvidence(ctx context.Context, state *codeWikiR
 	}
 	if page.Category == types.CodeWikiPageCategoryArchitecture || page.Category == types.CodeWikiPageCategoryInteraction ||
 		page.Category == types.CodeWikiPageCategoryOverview || page.Category == types.CodeWikiPageCategoryRepository ||
-		page.Category == types.CodeWikiPageCategoryWorkflow {
+		page.Category == types.CodeWikiPageCategoryWorkflow || types.IsCodeWikiFrontendCategory(page.Category) {
 		seen := make(map[string]bool)
 		seenRelations := make(map[string]bool)
 		relations := append([]codebase.RelationEdge(nil), state.relations...)
@@ -1415,6 +1500,18 @@ func (s *codeWikiService) retrieveEvidence(ctx context.Context, state *codeWikiR
 			return relations[i].Kind == "package_import" && relations[j].Kind != "package_import"
 		})
 		for _, edge := range relations {
+			if types.IsCodeWikiFrontendCategory(page.Category) {
+				matches := false
+				for _, anchor := range page.SourcePaths {
+					if (edge.FromRepositoryID == page.RepositoryID && edge.FromPath == anchor) || (edge.ToRepositoryID == page.RepositoryID && edge.ToPath == anchor) {
+						matches = true
+						break
+					}
+				}
+				if !matches {
+					continue
+				}
+			}
 			if page.Category == types.CodeWikiPageCategoryRepository && page.RepositoryID != "" &&
 				edge.FromRepositoryID != page.RepositoryID && edge.ToRepositoryID != page.RepositoryID {
 				continue
@@ -1466,10 +1563,16 @@ func (s *codeWikiService) retrieveEvidence(ctx context.Context, state *codeWikiR
 		repoOrder = append(repoOrder, repoID)
 	}
 	sort.Strings(repoOrder)
+	if types.IsCodeWikiFrontendCategory(page.Category) {
+		sort.SliceStable(repoOrder, func(i, j int) bool { return repoOrder[i] == page.RepositoryID && repoOrder[j] != page.RepositoryID })
+	}
 
 	perRepo := codeWikiMaxEvidencePerPage / maxInt(len(repoOrder), 1)
 	if perRepo < 1 {
 		perRepo = 1
+	}
+	if types.IsCodeWikiFrontendCategory(page.Category) {
+		perRepo = codeWikiMaxEvidencePerPage
 	}
 	for _, repoID := range repoOrder {
 		scope := state.scopes[repoID]
@@ -1530,6 +1633,20 @@ func (s *codeWikiService) retrieveEvidence(ctx context.Context, state *codeWikiR
 
 // codeWikiEvidenceQueries derives bounded search terms from the page scope.
 func codeWikiEvidenceQueries(page codeWikiPlannedPage) []string {
+	if types.IsCodeWikiFrontendCategory(page.Category) && len(page.SourcePaths) > 0 {
+		var queries []string
+		for _, anchor := range page.SourcePaths {
+			name := strings.TrimSuffix(filepath.Base(anchor), filepath.Ext(anchor))
+			if name == "index" || name == "main" {
+				name = filepath.Base(filepath.Dir(anchor))
+			}
+			queries = append(queries, name, anchor)
+			if len(queries) >= codeWikiMaxQueriesPerPage {
+				break
+			}
+		}
+		return queries
+	}
 	base := []string{page.Title, page.Scope}
 	switch page.Category {
 	case types.CodeWikiPageCategoryInteraction:
@@ -1731,8 +1848,8 @@ func (s *codeWikiService) callModel(ctx context.Context, state *codeWikiRunState
 				return "", err
 			}
 		}
-		if state.run.ModelCalls >= state.cfg.MaxModelCalls {
-			return "", fmt.Errorf("model call budget exhausted")
+		if state.modelBudgetExhausted() {
+			return "", errCodeWikiBudgetPaused
 		}
 		state.run.ModelCalls++ // Failed requests and retries also consume budget.
 		done := state.beginActivity(ctx, "调用生成模型 · "+state.run.Phase)
@@ -1770,6 +1887,12 @@ func (s *codeWikiService) callModel(ctx context.Context, state *codeWikiRunState
 		s.setRunPhase(ctx, state.run, state.run.Status, phase)
 	}
 	return "", lastErr
+}
+
+// The budget bounds one worker pass, not the total size of the knowledge base.
+// A resumed pass gets a fresh allowance; cumulative usage remains visible.
+func (state *codeWikiRunState) modelBudgetExhausted() bool {
+	return state.run.ModelCalls-state.modelCallsAtStart >= state.cfg.MaxModelCalls
 }
 
 const (
@@ -1850,8 +1973,9 @@ func renderCodeWikiEvidence(state *codeWikiRunState, evidence []types.CodeWikiEv
 }
 
 func codeWikiKnownLimits(state *codeWikiRunState) string {
+	planningLimits := frontendPlanningLimits(state)
 	if state.capabilities == nil {
-		return "分析能力未记录：调用关系仅在有证据时描述。"
+		return "分析能力未记录：调用关系仅在有证据时描述。" + planningLimits
 	}
 	var notes []string
 	if !state.capabilities.HasCapability(types.CodeWikiCapCallGraph) {
@@ -1866,7 +1990,7 @@ func codeWikiKnownLimits(state *codeWikiRunState) string {
 		notes = append(notes, "无符号解析：结构描述以目录和文件为据")
 	}
 	notes = append(notes, "所有引用必须指向快照中的固定 commit；无法确认的关系必须标注为未确认")
-	return strings.Join(notes, "；")
+	return strings.Join(notes, "；") + planningLimits
 }
 
 // collectCodeWikiCallRelations keeps a deterministic bounded sample for source

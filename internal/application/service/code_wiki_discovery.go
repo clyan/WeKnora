@@ -16,6 +16,27 @@ func (s *codeWikiService) discoverCodeWikiAdditions(ctx context.Context, state *
 	pages []codeWikiPlannedPage, summaries map[string]*codeWikiRepoSummary, lang string,
 ) ([]codeWikiPlannedPage, error) {
 	guard := state.cfg.PublicationGuard
+	if state.cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend {
+		if len(state.cfg.SourceChanges) == 0 {
+			return pages, nil
+		}
+		state.pages = pages
+		catalog, err := s.planFrontendCatalog(ctx, state, summaries, lang)
+		if err != nil {
+			return nil, err
+		}
+		known := make(map[string]bool, len(pages))
+		for _, page := range pages {
+			known[page.Slug] = true
+		}
+		var proposed []codeWikiPlannedPage
+		for _, page := range catalog {
+			if !known[page.Slug] {
+				proposed = append(proposed, page)
+			}
+		}
+		return normalizeCodeWikiAdditions(state, pages, proposed, summaries, guard)
+	}
 	if state.cfg.DirectoryVersion != types.CodeWikiDirectoryVersionV1 || len(state.cfg.SourceChanges) == 0 || len(pages) >= state.cfg.MaxPages {
 		return pages, nil
 	}
@@ -68,7 +89,12 @@ func normalizeCodeWikiAdditions(state *codeWikiRunState, pages, proposed []codeW
 		if !anchored {
 			return nil, fmt.Errorf("new page has no changed source anchor")
 		}
-		page, err := normalizeCodeWikiV1Page(page, nil, state, summaries)
+		var err error
+		if state.cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend {
+			page, err = normalizeFrontendPage(page, state, summaries)
+		} else {
+			page, err = normalizeCodeWikiV1Page(page, nil, state, summaries)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -76,7 +102,7 @@ func normalizeCodeWikiAdditions(state *codeWikiRunState, pages, proposed []codeW
 			continue
 		}
 		known[page.Slug] = true
-		if len(pages)+len(additions) >= state.cfg.MaxPages {
+		if state.cfg.DirectoryVersion != types.CodeWikiDirectoryVersionFrontend && len(pages)+len(additions) >= state.cfg.MaxPages {
 			return nil, fmt.Errorf("new page proposals exceed frozen page budget")
 		}
 		additions = append(additions, page)

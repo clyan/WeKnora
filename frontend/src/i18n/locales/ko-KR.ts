@@ -3470,6 +3470,17 @@ export default {
     attachmentStillProcessing: '첨부 파일 {name}을(를) 아직 분석 중입니다'
   },
   codeWiki: {
+    template: {
+      title: '지식 구성 템플릿',
+      frontend: '프런트엔드 코드 지식 목록',
+      description: '실제 저장소 코드를 읽고 페이지, API, 컴포넌트, 아키텍처와 흐름을 계획합니다. 자동 배치 분석과 OKF 내보내기를 지원하며, 근거가 부족하면 명시하고 백엔드 동작은 추론하지 않습니다.',
+      fill: '템플릿 기본 요구 사항 채우기 / 복원',
+      replaceConfirm: '현재 내용 및 추출 요구 사항을 템플릿 기본값으로 바꾸시겠습니까?',
+      existingHint: '새 작업은 프런트엔드 목록을 사용합니다. 기존 게시 디렉터리와 혼합할 수 없습니다.',
+      loadFailed: '기본 템플릿을 불러오지 못했습니다. 설정을 다시 열어 주세요.',
+      export: 'OKF 내보내기',
+      exportFailed: '내보내기에 실패했습니다. 먼저 지식 문서를 게시한 후 다시 시도해 주세요.',
+    },
     workspace: {
       documentPreview: '문서 미리보기',
       candidateDocuments: '이번 실행의 문서',

@@ -35,6 +35,9 @@ func sameCodeWikiGenerationInputs(published *types.CodeWikiRun, modelID string, 
 	previous.PublicationGuard, cfg.PublicationGuard = nil, nil
 	previous.SourceChanges, cfg.SourceChanges = nil, nil
 	previous.SnapshotReferences, cfg.SnapshotReferences = nil, nil
+	// Execution checkpoints do not change generation inputs.
+	previous.FrontendPlanning, cfg.FrontendPlanning = nil, nil
+	previous.FrontendPlanReady, cfg.FrontendPlanReady = false, false
 	if !reflect.DeepEqual(previous, cfg) {
 		return false
 	}

@@ -43,7 +43,7 @@ func TestCodeWikiExecutionActivityTracksRealReadsAndModelCalls(t *testing.T) {
 	require.Equal(t, "operation_completed", events[5].Kind)
 	require.Contains(t, events[4].Message, "调用生成模型 · 规划文档目录")
 	_, err = s.callModel(ctx, state, "exhausted")
-	require.ErrorContains(t, err, "budget exhausted")
+	require.ErrorIs(t, err, errCodeWikiBudgetPaused)
 	require.Len(t, events, 6, "a request never started must not appear as running")
 	for _, event := range events {
 		require.NotContains(t, event.Message, "private source contents")

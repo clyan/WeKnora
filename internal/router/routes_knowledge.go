@@ -267,8 +267,10 @@ func RegisterCodeWikiRoutes(r *gin.RouterGroup, codeWikiHandler *handler.CodeWik
 	if codeWikiHandler == nil {
 		return
 	}
+	r.GET("/code-wiki/templates", g.Viewer(), codeWikiHandler.GetTemplates)
 	cw := r.Group("/knowledgebase/:kb_id/code-wiki")
 	{
+		cw.GET("/export/okf", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ExportOKF)
 		// Analysis provider profile: read Viewer+, configure/test requires
 		// write (tests call out to the configured provider/service).
 		cw.GET("/analysis-profile", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.GetAnalysisProfile)

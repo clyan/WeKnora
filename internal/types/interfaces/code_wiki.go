@@ -195,6 +195,7 @@ type TX interface {
 // provider profiles, repository binding management, snapshot sync,
 // generation runs and publication.
 type CodeWikiService interface {
+	ExportOKF(ctx context.Context, kbID string) ([]byte, error)
 	ApproveRunImpact(ctx context.Context, kbID, runID string, req *types.CodeWikiImpactReviewRequest) error
 	ListSourceDirectory(ctx context.Context, kbID, repositoryID, snapshotID, prefix, after string) (*types.CodeWikiSourceDirectory, error)
 	ListSourcePages(ctx context.Context, kbID, repositoryID, snapshotID, path, after string) (*types.CodeWikiSourcePages, error)

@@ -6,17 +6,23 @@
       <nav class="document-nav" :aria-label="$t('codeWiki.workspace.candidateDocuments')">
         <div class="document-nav-title">{{ $t('codeWiki.workspace.candidateDocuments') }} <span>{{ pages.length }}</span></div>
         <div class="document-nav-items">
-          <button v-for="page in pages" :key="page.page_key" type="button"
-            :class="['document-nav-item', { selected: pageKey === page.page_key }]"
-            :aria-current="pageKey === page.page_key ? 'page' : undefined" @click="pageKey = page.page_key">
-            <t-icon :name="page.generation_error ? 'error-circle' : page.content ? 'file' : 'time'" size="16px" />
-            <span>{{ page.title || page.page_key }}</span>
-          </button>
+          <CodeWikiDocumentTree :nodes="documentTree" :selected-page-key="pageKey">
+            <template #page="{ page }">
+              <button type="button"
+                :class="['document-nav-item', { selected: pageKey === page.page_key }]"
+                :aria-current="pageKey === page.page_key ? 'page' : undefined" @click="pageKey = page.page_key">
+                <t-loading v-if="working && page.status === 'pending' && ['retrieving', 'generating', 'validating'].includes(page.validation_status)" size="16px" />
+                <t-icon v-else :name="page.generation_error ? 'error-circle' : page.content ? 'file' : 'time'" size="16px" />
+                <span>{{ page.title || page.page_key }}</span>
+              </button>
+            </template>
+          </CodeWikiDocumentTree>
         </div>
       </nav>
       <main ref="readingPane" class="document-reading-pane">
         <template v-if="selectedPage">
           <header class="document-header">
+            <p v-if="selectedPage.category_path?.length" class="document-path">{{ selectedPage.category_path.join(' / ') }}</p>
             <h2>{{ selectedPage.title || selectedPage.page_key }}</h2>
             <div class="document-meta">
               <t-tag size="small" variant="light" :theme="selectedPage.generation_error ? 'danger' : selectedPage.status === 'pending' ? 'default' : 'success'">
@@ -74,11 +80,14 @@ import { computed, nextTick, ref, watch } from 'vue'
 import type { CodeWikiRunPage } from '@/api/code-wiki'
 import { enhanceMarkdownContainer } from '@/utils/mermaidShared'
 import CodeWikiMarkdown from './CodeWikiMarkdown.vue'
+import CodeWikiDocumentTree from './CodeWikiDocumentTree.vue'
+import { buildDocumentTree } from './documentTree'
 
 const props = defineProps<{ pages: CodeWikiRunPage[]; working: boolean; newPages?: Record<string, string> }>()
 const visible = defineModel<boolean>('visible', { default: false })
 const pageKey = defineModel<string>('pageKey', { default: '' })
 const selectedPage = computed(() => props.pages.find(page => page.page_key === pageKey.value))
+const documentTree = computed(() => buildDocumentTree(props.pages))
 const readingPane = ref<HTMLElement | null>(null)
 
 async function enhancePreview() {
@@ -95,14 +104,14 @@ watch(pageKey, () => {
 <style lang="less" scoped>
 @import '@/components/css/markdown.less';
 
-.document-reader { display: grid; grid-template-columns: 240px minmax(0, 1fr); height: 78vh; min-height: 0; overflow: hidden; }
+.document-reader { display: grid; grid-template-columns: 280px minmax(0, 1fr); height: 78vh; min-height: 0; overflow: hidden; }
 .document-nav { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--td-component-stroke); background: var(--td-bg-color-secondarycontainer); }
 .document-nav-title { display: flex; justify-content: space-between; padding: 18px 16px; font-size: 13px; font-weight: 600; }
 .document-nav-items { min-height: 0; overflow-y: auto; padding: 0 8px 16px; }
 .document-nav-item {
   display: flex; align-items: flex-start; gap: 8px; width: 100%; border: 0; border-radius: 6px; padding: 10px;
   background: transparent; color: var(--td-text-color-secondary); cursor: pointer; text-align: left; font: inherit; font-size: 13px; line-height: 1.5;
-  .t-icon { flex-shrink: 0; margin-top: 2px; }
+  .t-icon, .t-loading { flex-shrink: 0; margin-top: 2px; }
   span { overflow-wrap: anywhere; }
   &:hover { background: var(--td-bg-color-container-hover); }
   &.selected { background: var(--td-brand-color-light); color: var(--td-brand-color); font-weight: 600; }
@@ -112,6 +121,7 @@ watch(pageKey, () => {
 .document-header { margin-bottom: 24px; border-bottom: 1px solid var(--td-component-stroke); padding-bottom: 20px;
   h2 { margin: 0 0 12px; font-size: 24px; line-height: 1.4; overflow-wrap: anywhere; }
 }
+.document-path { margin: 0 0 10px; color: var(--td-text-color-placeholder); font-size: 12px; overflow-wrap: anywhere; }
 .document-meta { display: flex; align-items: center; gap: 10px; color: var(--td-text-color-secondary); font-size: 12px; p { margin: 0; } }
 .document-error { color: var(--td-error-color); font-size: 13px; overflow-wrap: anywhere; }
 .document-body { min-width: 0; }

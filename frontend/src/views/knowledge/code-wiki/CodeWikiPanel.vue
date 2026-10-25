@@ -12,6 +12,9 @@
       <t-button v-if="canEdit" variant="text" size="small" @click="sourcesVisible = true">
         {{ $t('codeWiki.workspace.manageSources') }}
       </t-button>
+      <t-button variant="text" size="small" :loading="exportingOKF" @click="downloadOKF">
+        {{ $t('codeWiki.template.export') }}
+      </t-button>
     </div>
 
     <section v-if="showSources" class="cw-section">
@@ -355,8 +358,9 @@
         </details>
         <!-- Per-page progress: planned pages show as pending before generation
              reaches them; failures carry the concrete reason. -->
-        <ul v-if="runPages.length" class="run-page-list">
-          <li v-for="p in runPages" :key="p.id" class="run-page-item">
+        <CodeWikiDocumentTree v-if="runPages.length" :key="displayedRun?.id" class="run-page-list" :nodes="runDocumentTree">
+          <template #page="{ page: p }">
+          <div class="run-page-item">
             <button type="button" class="run-page-name page-link" aria-haspopup="dialog"
               @click="openDocumentPreview(p.page_key)">{{ p.title || p.page_key }}</button>
             <t-tag v-if="p.generation_error" size="small" variant="light" theme="danger">
@@ -379,8 +383,9 @@
             <t-tooltip v-if="p.generation_error" :content="p.generation_error" placement="top">
               <span class="run-page-error">{{ p.generation_error }}</span>
             </t-tooltip>
-          </li>
-        </ul>
+          </div>
+          </template>
+        </CodeWikiDocumentTree>
       </div>
 
       <t-table v-if="runs.length" row-key="id" :data="runs" :columns="runColumns" size="small" :loading="runsLoading">
@@ -433,6 +438,7 @@ import {
   listCodeWikiSourceDirectory,
   listCodeWikiSourcePages,
   approveCodeWikiImpact,
+  exportCodeWikiOKF,
 } from '@/api/code-wiki'
 import type {
   CodeWikiAnalysisProfile, CodeWikiCapabilityReport, CodeWikiRepositoryBinding, CodeWikiRun,
@@ -445,6 +451,8 @@ import type {
 import { listDataSources } from '@/api/datasource'
 import CodeWikiRepositoryDialog from './CodeWikiRepositoryDialog.vue'
 import CodeWikiDocumentPreview from './CodeWikiDocumentPreview.vue'
+import CodeWikiDocumentTree from './CodeWikiDocumentTree.vue'
+import { buildDocumentTree } from './documentTree'
 import CodeWikiProviderDialog from './CodeWikiProviderDialog.vue'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import DataSourceSettings from '../settings/DataSourceSettings.vue'
@@ -454,6 +462,26 @@ const props = defineProps<{
   canEdit: boolean
   showSources?: boolean
 }>()
+
+const exportingOKF = ref(false)
+const downloadOKF = async () => {
+  exportingOKF.value = true
+  try {
+    const blob = await exportCodeWikiOKF(props.knowledgeBaseId)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'frontend-knowledge-okf.zip'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch {
+    MessagePlugin.error(t('codeWiki.template.exportFailed'))
+  } finally {
+    exportingOKF.value = false
+  }
+}
 
 const emit = defineEmits<{
   (e: 'open-kb-settings'): void
@@ -655,6 +683,7 @@ const loadRuns = async () => {
 // Per-page progress for the active run (planned pages appear as pending
 // before generation reaches them; errors carry the per-page reason).
 const runPages = ref<CodeWikiRunPage[]>([])
+const runDocumentTree = computed(() => buildDocumentTree(runPages.value))
 const runManifest = ref<CodeWikiRunRepository[]>([])
 let runDetailSeq = 0
 const loadRunDetail = async () => {
@@ -1224,6 +1253,7 @@ const runStatusTheme = (status: string): any => {
   gap: 8px;
   font-size: 12px;
   min-width: 0;
+  padding: 6px 4px;
 }
 
 .run-page-name {

@@ -45,6 +45,14 @@ func codeWikiFoldersForRun(run *types.CodeWikiRun) (map[string][]string, error) 
 	if cfg.DirectoryVersion == 0 {
 		return codeWikiCategoryFolder, nil
 	}
+	if cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend {
+		folders := make(map[string][]string)
+		for _, category := range types.CodeWikiFrontendCategories() {
+			folders[category.Category] = []string{category.Title}
+		}
+		folders["frontend_workflow"] = []string{"架构总览", "flows"}
+		return folders, nil
+	}
 	if cfg.DirectoryVersion != types.CodeWikiDirectoryVersionV1 {
 		return nil, fmt.Errorf("unsupported directory version %d", cfg.DirectoryVersion)
 	}

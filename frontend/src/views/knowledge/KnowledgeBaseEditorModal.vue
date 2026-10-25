@@ -119,7 +119,7 @@
                       </div>
 
                       <!-- Wiki 提取粒度 (仅当 Wiki 启用时显示) -->
-                      <div v-if="!isFAQ && formData.indexingStrategy.wikiEnabled" class="form-item">
+                      <div v-if="!isFAQ && !isCodeWiki && formData.indexingStrategy.wikiEnabled" class="form-item">
                         <label class="form-label">{{ $t('knowledgeEditor.wiki.extractionGranularityLabel') }}</label>
                         <p class="form-tip">{{ $t('knowledgeEditor.wiki.extractionGranularityTip') }}</p>
                         <t-radio-group
@@ -138,6 +138,16 @@
                           </t-radio-button>
                         </t-radio-group>
                         <p class="form-tip granularity-hint">{{ granularityHint }}</p>
+                      </div>
+
+                      <div v-if="isCodeWiki" class="form-item">
+                        <label class="form-label">{{ $t('codeWiki.template.title') }}</label>
+                        <p>{{ $t('codeWiki.template.frontend') }}</p>
+                        <p class="form-tip">{{ $t('codeWiki.template.description') }}</p>
+                        <t-button variant="outline" size="small" :disabled="!codeWikiTemplate" @click="fillCodeWikiTemplate">
+                          {{ $t('codeWiki.template.fill') }}
+                        </t-button>
+                        <p v-if="editorMode === 'edit'" class="form-tip">{{ $t('codeWiki.template.existingHint') }}</p>
                       </div>
 
                       <div v-if="!isFAQ && formData.indexingStrategy.wikiEnabled" class="form-item">
@@ -492,6 +502,7 @@ import KBShareSettings from './settings/KBShareSettings.vue'
 import DataSourceSettings from './settings/DataSourceSettings.vue'
 import KnowledgeBaseActivitySettings from './settings/KnowledgeBaseActivitySettings.vue'
 import { useI18n } from 'vue-i18n'
+import { getCodeWikiTemplate, type CodeWikiTemplate } from '@/api/code-wiki'
 
 const uiStore = useUIStore()
 const authStore = useAuthStore()
@@ -685,6 +696,41 @@ const advancedSettingsRef = ref<InstanceType<typeof KBAdvancedSettings>>()
 const formData = ref<any>(null)
 const isFAQ = computed(() => formData.value?.type === 'faq')
 const isCodeWiki = computed(() => formData.value?.type === 'code_wiki')
+const codeWikiTemplate = ref<CodeWikiTemplate | null>(null)
+const loadCodeWikiTemplate = async () => {
+  try {
+    const result = await getCodeWikiTemplate()
+    if (result.success) codeWikiTemplate.value = result.data
+  } catch {
+    MessagePlugin.error(t('codeWiki.template.loadFailed'))
+  }
+}
+const applyCodeWikiTemplate = () => {
+  if (!formData.value || !codeWikiTemplate.value) return
+  formData.value.wikiConfig.contentInstructions = codeWikiTemplate.value.content_instructions
+  formData.value.wikiConfig.extractionInstructions = codeWikiTemplate.value.extraction_instructions
+  formData.value.codeWikiConfig.templateId = codeWikiTemplate.value.id
+}
+const fillCodeWikiTemplate = () => {
+  const config = formData.value?.wikiConfig
+  if (!config) return
+  if (!config.contentInstructions && !config.extractionInstructions) {
+    applyCodeWikiTemplate()
+    return
+  }
+  const dialog = DialogPlugin.confirm({
+    header: t('common.confirm'), body: t('codeWiki.template.replaceConfirm'),
+    confirmBtn: t('common.confirm'), cancelBtn: t('common.cancel'),
+    onConfirm: () => { dialog.destroy(); applyCodeWikiTemplate() },
+    onCancel: () => dialog.destroy(),
+  })
+}
+watch([isCodeWiki, codeWikiTemplate], () => {
+  if (editorMode.value === 'create' && isCodeWiki.value &&
+      !formData.value.wikiConfig.contentInstructions && !formData.value.wikiConfig.extractionInstructions) {
+    applyCodeWikiTemplate()
+  }
+})
 
 const kbCreateNeedsEmbedding = computed(() => {
   if (!formData.value || formData.value.type === 'faq' || formData.value.type === 'code_wiki') return false
@@ -812,8 +858,8 @@ const initFormData = (type: 'document' | 'faq' | 'code_wiki' = 'document') => {
       extractionInstructions: '',
     },
     codeWikiConfig: {
+      templateId: 'frontend_catalog_v1',
       languages: [] as string[],
-      maxPagesPerRun: 0,
       maxModelCallsPerRun: 0,
       runTimeoutMinutes: 0,
     },
@@ -964,8 +1010,8 @@ const loadKBData = async (
         extractionInstructions: kb.wiki_config?.extraction_instructions || '',
       },
       codeWikiConfig: {
+        templateId: kb.code_wiki_config?.template_id || 'frontend_catalog_v1',
         languages: kb.code_wiki_config?.languages || [],
-        maxPagesPerRun: kb.code_wiki_config?.max_pages_per_run || 0,
         maxModelCallsPerRun: kb.code_wiki_config?.max_model_calls_per_run || 0,
         runTimeoutMinutes: kb.code_wiki_config?.run_timeout_minutes || 0,
       },
@@ -1344,8 +1390,8 @@ const buildSubmitData = () => {
   // reuse wiki_config above (plan §3.1: 不维护两套相同设置).
   if (formData.value.type === 'code_wiki') {
     data.code_wiki_config = {
+      template_id: formData.value.codeWikiConfig?.templateId || 'frontend_catalog_v1',
       languages: formData.value.codeWikiConfig?.languages || [],
-      max_pages_per_run: formData.value.codeWikiConfig?.maxPagesPerRun || 0,
       max_model_calls_per_run: formData.value.codeWikiConfig?.maxModelCallsPerRun || 0,
       run_timeout_minutes: formData.value.codeWikiConfig?.runTimeoutMinutes || 0,
     }
@@ -1440,6 +1486,9 @@ const doSubmit = async () => {
 
       // 1. 更新基本信息（名称、描述）和 FAQ/Wiki 配置
       const updateConfig: any = {}
+      if (formData.value.type === 'code_wiki') {
+        updateConfig.code_wiki_config = data.code_wiki_config
+      }
       if (formData.value.type === 'faq' && formData.value.faqConfig) {
         updateConfig.faq_config = {
           index_mode: formData.value.faqConfig.indexMode || 'question_only',
@@ -1616,7 +1665,7 @@ watch(() => props.visible, async (newVal) => {
     }
     
     // 加载模型列表与空间默认存储引擎（创建 KB 时即使用，不依赖是否打开「存储引擎」Tab）
-    await Promise.all([loadAllModels(), loadTenantDefaultStorageProvider()])
+    await Promise.all([loadAllModels(), loadTenantDefaultStorageProvider(), loadCodeWikiTemplate()])
 
     if (generation !== kbEditorLoadGeneration || !props.visible) return
     

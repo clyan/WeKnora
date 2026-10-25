@@ -51,3 +51,19 @@ func TestCodeWikiNoChangeRequiresCompleteJointInput(t *testing.T) {
 	published.ConfigSnapshot = types.JSON(`invalid`)
 	require.False(t, check(cfg, baseline))
 }
+
+func TestCodeWikiFrontendNoChangeIgnoresExecutionCheckpoints(t *testing.T) {
+	cfg := codeWikiRunConfig{DirectoryVersion: types.CodeWikiDirectoryVersionFrontend, FrontendPlannerVersion: 1}
+	stored := cfg
+	stored.FrontendPlanReady = true
+	stored.FrontendPlanning = &codeWikiFrontendPlanning{Repositories: map[string]*frontendRepoPlan{
+		"frontend": {Cursor: 32, Notes: "execution-only notes"},
+	}}
+	blob, err := json.Marshal(stored)
+	require.NoError(t, err)
+	published := &types.CodeWikiRun{Status: types.CodeWikiRunStatusPublished, ModelID: "model", ConfigSnapshot: blob}
+	repos := []*types.CodeWikiRunRepository{{RepositoryID: "frontend", SnapshotID: "snap", ArtifactID: "index", CommitSHA: "sha", Role: "frontend"}}
+	require.True(t, sameCodeWikiGenerationInputs(published, "model", 0, cfg, repos, repos))
+	cfg.FrontendPlannerVersion++
+	require.False(t, sameCodeWikiGenerationInputs(published, "model", 0, cfg, repos, repos), "planner changes are generation inputs")
+}

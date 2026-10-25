@@ -16,6 +16,18 @@ import (
 func (s *codeWikiService) changedCodeWikiEvidence(ctx context.Context, state *codeWikiRunState, page codeWikiPlannedPage, budget int) []types.CodeWikiEvidenceSpec {
 	grouped := make(map[string][]types.CodeWikiSourceChange)
 	for _, change := range state.cfg.SourceChanges {
+		if types.IsCodeWikiFrontendCategory(page.Category) {
+			matches := false
+			for _, anchor := range page.SourcePaths {
+				if change.RepositoryID == page.RepositoryID && change.Path == anchor {
+					matches = true
+					break
+				}
+			}
+			if !matches {
+				continue
+			}
+		}
 		if change.AfterHash == "" || change.AfterStartLine == 0 {
 			continue
 		}

@@ -2670,6 +2670,17 @@ export default {
     defaultLocaleBrowser: 'Browser / host default'
   },
   codeWiki: {
+    template: {
+      title: 'Knowledge template',
+      frontend: 'Frontend code knowledge catalog',
+      description: 'Read the actual repository to plan pages, APIs, components, architecture and flows. Analysis runs in automatic batches with OKF export. Missing evidence is explicit; backend behavior is not inferred.',
+      fill: 'Fill / restore template defaults',
+      replaceConfirm: 'Replace both current content and extraction instructions with template defaults?',
+      existingHint: 'New runs use the frontend catalog; legacy published directories cannot be mixed into it.',
+      loadFailed: 'Could not load template defaults. Reopen settings to retry.',
+      export: 'Export OKF',
+      exportFailed: 'Export failed. Publish knowledge documents first and retry.',
+    },
     workspace: {
       documentPreview: 'Document preview',
       candidateDocuments: 'Documents in this run',

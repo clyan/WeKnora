@@ -25,6 +25,29 @@ func NewCodeWikiHandler(service interfaces.CodeWikiService) *CodeWikiHandler {
 	return &CodeWikiHandler{service: service}
 }
 
+// GetTemplates exposes producer defaults without duplicating prompt text in the UI.
+func (h *CodeWikiHandler) GetTemplates(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
+		"id":                      types.CodeWikiFrontendTemplate,
+		"content_instructions":    types.CodeWikiFrontendContentInstructions,
+		"extraction_instructions": types.CodeWikiFrontendExtractionInstructions,
+	}})
+}
+
+func (h *CodeWikiHandler) ExportOKF(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	bundle, err := h.service.ExportOKF(c.Request.Context(), kbID)
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="frontend-knowledge-okf.zip"`)
+	c.Data(http.StatusOK, "application/zip", bundle)
+}
+
 // resolveCodeWikiKB validates the :kb_id route parameter and rewrites the
 // context's tenant to the KB owner's (shared access), matching the wiki
 // handler conventions.
@@ -233,13 +256,20 @@ func (h *CodeWikiHandler) GetRun(c *gin.Context) {
 		return
 	}
 	var frozen struct {
-		SourceChanges []types.CodeWikiSourceChange    `json:"source_changes"`
-		Guard         *types.CodeWikiPublicationGuard `json:"publication_guard"`
+		DirectoryVersion  int                             `json:"directory_version"`
+		FrontendPlanReady bool                            `json:"frontend_plan_ready"`
+		SourceChanges     []types.CodeWikiSourceChange    `json:"source_changes"`
+		Guard             *types.CodeWikiPublicationGuard `json:"publication_guard"`
 	}
 	_ = json.Unmarshal(run.ConfigSnapshot, &frozen)
 	baselineRunID := ""
 	if frozen.Guard != nil {
 		baselineRunID = frozen.Guard.BaselineRunID
+		if frozen.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend && !frozen.FrontendPlanReady {
+			// A pause during discovery is resumable planning, not an approval request
+			// for an incomplete write set.
+			frozen.Guard.ReviewRequired = false
+		}
 	}
 	var heartbeatAt *time.Time
 	if run.LeaseExpiresAt != nil {

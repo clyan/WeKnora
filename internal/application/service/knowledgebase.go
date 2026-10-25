@@ -150,6 +150,20 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 		return nil, apperrors.NewBadRequestError(fmt.Sprintf("unknown knowledge base type %q", kb.Type))
 	}
 	kb.EnsureDefaults()
+	if kb.IsCodeWiki() {
+		if kb.CodeWikiConfig.TemplateID != types.CodeWikiFrontendTemplate {
+			return nil, apperrors.NewBadRequestError("unsupported code wiki template")
+		}
+		if kb.WikiConfig == nil {
+			kb.WikiConfig = &types.WikiConfig{}
+		}
+		if kb.WikiConfig.ContentInstructions == "" {
+			kb.WikiConfig.ContentInstructions = types.CodeWikiFrontendContentInstructions
+		}
+		if kb.WikiConfig.ExtractionInstructions == "" {
+			kb.WikiConfig.ExtractionInstructions = types.CodeWikiFrontendExtractionInstructions
+		}
+	}
 	applyTenantDefaultStorageProvider(ctx, kb)
 	if err := s.applyAndValidateStorageBackend(ctx, kb); err != nil {
 		return nil, err
@@ -551,6 +565,9 @@ func (s *knowledgeBaseService) UpdateKnowledgeBase(ctx context.Context,
 			// Only meaningful on code_wiki KBs; EnsureDefaults drops it
 			// elsewhere. Normalization clamps budgets into range.
 			config.CodeWikiConfig.Normalize()
+			if config.CodeWikiConfig.TemplateID != types.CodeWikiFrontendTemplate {
+				return nil, apperrors.NewBadRequestError("unsupported code wiki template")
+			}
 			kb.CodeWikiConfig = config.CodeWikiConfig
 		}
 		if config.AutoTagConfig != nil {

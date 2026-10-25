@@ -98,7 +98,7 @@ func (s *codeWikiService) generatePatchedCodeWikiPage(ctx context.Context, state
 	}
 	response, err := s.callModel(ctx, state, prompt)
 	if err != nil {
-		if errors.Is(err, errCodeWikiRunPaused) || errors.Is(err, errCodeWikiRunCanceled) {
+		if errors.Is(err, errCodeWikiRunPaused) || errors.Is(err, errCodeWikiRunCanceled) || ctx.Err() != nil {
 			return err
 		}
 		return fail("chapter patch generation failed: " + types.FormatCodeWikiError(err))
