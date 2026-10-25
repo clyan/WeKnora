@@ -87,7 +87,7 @@
         <t-button v-if="sourcePagesCursor" variant="text" :disabled="sourcePagesLoading" @click="loadSourcePages(true)">{{ $t('codeWiki.workspace.morePages') }}</t-button>
         <ul v-if="sourceRelatedPages.length">
           <li v-for="page in sourceRelatedPages" :key="page.id">
-            <button type="button" class="page-link" @click="taskVisible = true; sourceTreeVisible = false; selectedPageKey = page.page_key">
+            <button type="button" class="page-link" @click="taskVisible = true; sourceTreeVisible = false; openDocumentPreview(page.page_key)">
               {{ page.title }} · {{ page.generation_error ? $t('codeWiki.runs.pageFailed') : page.status === 'pending' ? $t('codeWiki.runs.pagePending') : $t('codeWiki.runs.pageDone') }}
             </button>
           </li>
@@ -357,8 +357,8 @@
              reaches them; failures carry the concrete reason. -->
         <ul v-if="runPages.length" class="run-page-list">
           <li v-for="p in runPages" :key="p.id" class="run-page-item">
-            <button type="button" class="run-page-name page-link" :aria-expanded="selectedPageKey === p.page_key"
-              @click="selectedPageKey = selectedPageKey === p.page_key ? '' : p.page_key">{{ p.title || p.page_key }}</button>
+            <button type="button" class="run-page-name page-link" aria-haspopup="dialog"
+              @click="openDocumentPreview(p.page_key)">{{ p.title || p.page_key }}</button>
             <t-tag v-if="p.generation_error" size="small" variant="light" theme="danger">
               {{ $t('codeWiki.runs.pageFailed') }}
             </t-tag>
@@ -381,34 +381,6 @@
             </t-tooltip>
           </li>
         </ul>
-        <div v-if="selectedPage" class="candidate-detail">
-          <h4>{{ selectedPage.title }}</h4>
-          <p class="cw-section-desc">{{ $t('codeWiki.workspace.candidateHint') }}</p>
-          <p v-if="selectedPage.generation_error" class="run-error">{{ selectedPage.generation_error }}</p>
-          <p v-if="selectedPage.baseline_changed" class="run-error">{{ $t('codeWiki.workspace.baselineChanged') }}</p>
-          <details v-for="change in selectedPage.section_changes || []" :key="change.id">
-            <summary>{{ change.title }} · {{ $t('codeWiki.workspace.chapterChanges') }}</summary>
-            <p>{{ $t('codeWiki.workspace.beforeChange') }}</p>
-            <pre class="candidate-content">{{ change.before }}</pre>
-            <p>{{ $t('codeWiki.workspace.afterChange') }}</p>
-            <pre class="candidate-content">{{ change.after }}</pre>
-          </details>
-          <details v-if="selectedPage.baseline_content !== undefined">
-            <summary>{{ $t('codeWiki.workspace.baselineContent') }}</summary>
-            <pre class="candidate-content">{{ selectedPage.baseline_content }}</pre>
-          </details>
-          <pre v-if="selectedPage.content" class="candidate-content">{{ selectedPage.content }}</pre>
-          <p v-else-if="selectedPage.status === 'skipped' && impactPlan?.new_pages?.[selectedPage.page_key]" class="cw-section-desc">
-            {{ $t('codeWiki.workspace.notCreated') }}
-          </p>
-          <p v-else class="cw-section-desc">{{ $t(['retrieving', 'generating', 'validating'].includes(selectedPage.validation_status)
-            ? `codeWiki.workspace.${selectedPage.validation_status}` : 'codeWiki.runs.pagePending') }}</p>
-          <ul v-if="selectedPage.evidence?.length">
-            <li v-for="evidence in selectedPage.evidence" :key="evidence.id">
-              {{ evidence.path }}:{{ evidence.start_line }}–{{ evidence.end_line }} · {{ evidence.commit_sha?.slice(0, 8) }}
-            </li>
-          </ul>
-        </div>
       </div>
 
       <t-table v-if="runs.length" row-key="id" :data="runs" :columns="runColumns" size="small" :loading="runsLoading">
@@ -427,6 +399,9 @@
       </t-table>
     </section>
     </SettingDrawer>
+
+    <CodeWikiDocumentPreview v-model:visible="documentPreviewVisible" v-model:page-key="selectedPageKey"
+      :pages="runPages" :working="isWorking" :new-pages="impactPlan?.new_pages" />
 
     <t-dialog :visible="!!syncErrorRepository" :header="$t('codeWiki.repositories.errorDetails')"
       :footer="false" width="680px" @close="syncErrorRepository = null">
@@ -469,6 +444,7 @@ import type {
 } from '@/api/code-wiki'
 import { listDataSources } from '@/api/datasource'
 import CodeWikiRepositoryDialog from './CodeWikiRepositoryDialog.vue'
+import CodeWikiDocumentPreview from './CodeWikiDocumentPreview.vue'
 import CodeWikiProviderDialog from './CodeWikiProviderDialog.vue'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import DataSourceSettings from '../settings/DataSourceSettings.vue'
@@ -500,6 +476,11 @@ const sourcesVisible = ref(false)
 const taskVisible = ref(false)
 const selectedRunId = ref('')
 const selectedPageKey = ref('')
+const documentPreviewVisible = ref(false)
+const openDocumentPreview = (pageKey: string) => {
+  selectedPageKey.value = pageKey
+  documentPreviewVisible.value = true
+}
 const editingRepository = ref<CodeWikiRepositoryBinding | null>(null)
 const connectionLost = ref(false)
 const actionPending = ref(false)
@@ -598,7 +579,6 @@ const activeRun = computed<CodeWikiRun | null>(() => {
   return runs.value.find((run) => !terminal.includes(run.status)) ?? null
 })
 const displayedRun = computed(() => runs.value.find(run => run.id === selectedRunId.value) ?? activeRun.value ?? runs.value[0] ?? null)
-const selectedPage = computed(() => runPages.value.find(page => page.page_key === selectedPageKey.value))
 const isExecuting = (status: string) => ['pending', 'preparing', 'analyzing', 'planning', 'generating', 'validating', 'publishing'].includes(status)
 const isWorking = computed(() => isExecuting(displayedRun.value?.status ?? ''))
 const latestActivity = computed(() => loadedRunId.value === displayedRun.value?.id ? runEvents.value[0] : undefined)
@@ -767,6 +747,7 @@ const refreshAll = async () => {
 }
 
 watch(() => displayedRun.value?.id, () => {
+  documentPreviewVisible.value = false
   loadedRunId.value = ''
   runEvents.value = []
   sourceChanges.value = []
@@ -1001,7 +982,6 @@ const runStatusTheme = (status: string): any => {
 .source-card:hover, .task-card:hover { border-color: var(--td-brand-color); }
 .page-link { background: none; border: 0; padding: 4px 0; color: var(--td-brand-color); cursor: pointer; text-align: left; }
 .candidate-detail { border-top: 1px solid var(--td-component-border); margin-top: 12px; overflow-wrap: anywhere; }
-.candidate-content { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; }
 .run-manifest { font-size: 12px; overflow-wrap: anywhere; margin-top: 12px; }
 .source-breadcrumb { display: flex; flex-wrap: wrap; gap: 4px; }
 .source-file-list { list-style: none; padding: 0; }

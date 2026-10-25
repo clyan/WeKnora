@@ -3471,6 +3471,9 @@ export default {
   },
   codeWiki: {
     workspace: {
+      documentPreview: '문서 미리보기',
+      candidateDocuments: '이번 실행의 문서',
+      sourceEvidence: '소스 참조',
       preserved: '원문 유지',
       notCreated: '미선택; 생성하지 않음',
       chapterChanges: '절 변경 내용',

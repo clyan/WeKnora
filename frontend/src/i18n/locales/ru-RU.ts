@@ -3471,6 +3471,9 @@ export default {
   },
   codeWiki: {
     workspace: {
+      documentPreview: 'Предпросмотр документа',
+      candidateDocuments: 'Документы этого запуска',
+      sourceEvidence: 'Ссылки на исходный код',
       preserved: 'Сохранено без изменений',
       notCreated: 'Не выбрано; не создаётся',
       chapterChanges: 'Изменения раздела',

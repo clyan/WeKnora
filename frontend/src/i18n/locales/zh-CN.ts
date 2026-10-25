@@ -3473,6 +3473,9 @@ export default {
   },
   codeWiki: {
     workspace: {
+      documentPreview: '文档预览',
+      candidateDocuments: '本次文档',
+      sourceEvidence: '代码引用',
       preserved: '原样保留',
       notCreated: '未采纳，不创建',
       chapterChanges: '章节差异',

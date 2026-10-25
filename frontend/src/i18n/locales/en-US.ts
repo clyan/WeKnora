@@ -2671,6 +2671,9 @@ export default {
   },
   codeWiki: {
     workspace: {
+      documentPreview: 'Document preview',
+      candidateDocuments: 'Documents in this run',
+      sourceEvidence: 'Source references',
       preserved: 'Preserved unchanged',
       notCreated: 'Not selected; not created',
       chapterChanges: 'Section changes',
