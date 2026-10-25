@@ -105,6 +105,10 @@ RUN if [ -n "$APK_MIRROR_ARG" ]; then \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# The source analyzer uses a platform-owned parser, never target-repository packages.
+RUN npm install --prefix /opt/weknora-code-analysis --ignore-scripts --no-audit --no-fund typescript@6.0.3 && \
+    node -e "if (require('/opt/weknora-code-analysis/node_modules/typescript').version !== '6.0.3') process.exit(1)"
+
 # Create data directories and set permissions
 RUN mkdir -p /data/files && \
     chown -R appuser:appuser /app /data/files

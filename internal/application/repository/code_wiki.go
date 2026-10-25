@@ -589,6 +589,9 @@ func (r *codeWikiRepository) TryAcquireRunLease(ctx context.Context, runID, owne
 // otherwise keep occupying the index slot.
 func (r *codeWikiRepository) DeleteRunsByKB(ctx context.Context, kbID string) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("knowledge_base_id = ?", kbID).Delete(&types.CodeWikiFactRecord{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("knowledge_base_id = ?", kbID).Delete(&types.CodeWikiRunEvent{}).Error; err != nil {
 			return err
 		}

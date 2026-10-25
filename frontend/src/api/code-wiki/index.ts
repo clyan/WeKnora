@@ -118,6 +118,8 @@ export type CodeWikiRunStatus =
 
 export interface CodeWikiRun {
   no_changes?: boolean;
+  requires_source_rebuild?: boolean;
+  full_source_reanalysis?: boolean;
   id: string;
   knowledge_base_id: string;
   status: CodeWikiRunStatus;
@@ -138,6 +140,20 @@ export interface CodeWikiRun {
   published_at?: string | null;
   created_at: string;
 }
+
+export interface CodeWikiFactRecord {
+  id: string;
+  run_id: string;
+  record_type: string;
+  record_key: string;
+  schema_version: number;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export const listCodeWikiFacts = (kbId: string, runId: string, params: { type: string; after?: string; limit?: number }) =>
+  get<{ success: boolean; data: { records: CodeWikiFactRecord[]; next_cursor: string } }>(
+    `/api/v1/knowledgebase/${kbId}/code-wiki/runs/${runId}/facts`, { params });
 
 export interface CodeWikiRunPage {
 	baseline_content?: string;

@@ -97,7 +97,7 @@ func (p *codeWikiPatchProvider) SearchCode(_ context.Context, scope codebase.Sna
 	p.searches++
 	path := "api.ts"
 	if scope.RepositoryID == "backend" {
-		path = "handler.go"
+		path = "handler.ts"
 	}
 	return []codebase.SearchHit{{Path: path, StartLine: 1, EndLine: 1, Snippet: "verified source"}}, nil
 }
@@ -142,7 +142,9 @@ func TestCodeWikiSectionGenerationAndPublicationReplayPreservesVersionsAndEviden
 		if round != 1 {
 			guard.AllowedSections[live.Slug] = map[string]string{sections[1].ID: sections[1].Hash}
 		}
-		cfg := codeWikiRunConfig{DirectoryVersion: 1, MaxModelCalls: 5, PublicationGuard: guard}
+		cfg := codeWikiRunConfig{Mode: types.CodeWikiModeProject, SourcePolicyVersion: types.CodeWikiSourcePolicyVersion,
+			FactSchemaVersion: types.CodeWikiFactSchemaVersion, SourceAnalyzerVersion: types.CodeWikiSourceAnalyzerVersion,
+			DirectoryVersion: 1, MaxModelCalls: 5, PublicationGuard: guard}
 		blob, err := json.Marshal(cfg)
 		require.NoError(t, err)
 		run := &types.CodeWikiRun{KnowledgeBaseID: "kb", TenantID: 1, Status: types.CodeWikiRunStatusGenerating, ConfigSnapshot: types.JSON(blob), TotalPages: 1}
@@ -155,9 +157,9 @@ func TestCodeWikiSectionGenerationAndPublicationReplayPreservesVersionsAndEviden
 			root := t.TempDir()
 			path := "api.ts"
 			if id == "backend" {
-				path = "handler.go"
+				path = "handler.ts"
 			}
-			require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte("changed source\n"), 0600))
+			require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte("export const value = 1;\n"), 0600))
 			state.scopes[id] = codebase.SnapshotScope{KnowledgeBaseID: "kb", RepositoryID: id, SnapshotID: id + "-target", CommitSHA: id + "-sha", LocalPath: root}
 		}
 		beforeCalls, beforeSearches := model.calls, provider.searches

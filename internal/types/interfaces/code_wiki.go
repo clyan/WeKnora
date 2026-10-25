@@ -242,6 +242,7 @@ type CodeWikiService interface {
 	// exclusions and reasons, never a silent subset.
 	GetRunDetail(ctx context.Context, kbID, runID string) (*types.CodeWikiRun, []*types.CodeWikiRunRepository, []*types.CodeWikiRunPage, error)
 	ListRuns(ctx context.Context, kbID string) ([]*types.CodeWikiRun, error)
+	ListFactRecords(ctx context.Context, kbID, runID, recordType, after string, limit int) ([]*types.CodeWikiFactRecord, error)
 	CancelRun(ctx context.Context, kbID, runID string) error
 	// PauseRun parks an in-flight run in paused; ResumeRun continues it from
 	// the persisted plan (staged pages kept, pending pages regenerate).

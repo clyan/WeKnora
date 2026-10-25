@@ -25,6 +25,28 @@ func NewCodeWikiHandler(service interfaces.CodeWikiService) *CodeWikiHandler {
 	return &CodeWikiHandler{service: service}
 }
 
+func (h *CodeWikiHandler) ListFactRecords(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	if err != nil {
+		respondCodeWikiError(c, apperrors.NewBadRequestError("invalid fact page limit"))
+		return
+	}
+	records, err := h.service.ListFactRecords(c.Request.Context(), kbID, c.Param("id"), c.DefaultQuery("type", "fact"), c.Query("after"), limit)
+	if err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	cursor := ""
+	if len(records) == limit {
+		cursor = records[len(records)-1].RecordKey
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"records": records, "next_cursor": cursor}})
+}
+
 // GetTemplates exposes producer defaults without duplicating prompt text in the UI.
 func (h *CodeWikiHandler) GetTemplates(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{

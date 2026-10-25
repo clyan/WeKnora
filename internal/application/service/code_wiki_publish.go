@@ -80,6 +80,9 @@ func (s *codeWikiService) PublishRun(ctx context.Context, kbID, runID string, re
 	if err := json.Unmarshal(run.ConfigSnapshot, &inputConfig); err != nil {
 		return nil, err
 	}
+	if err := validateCodeWikiRunPolicy(inputConfig); err != nil {
+		return nil, apperrors.NewBadRequestError(err.Error())
+	}
 	if len(inputConfig.SnapshotReferences) > 0 {
 		entries, err := s.repo.ListRunRepositories(ctx, runID)
 		if err != nil {

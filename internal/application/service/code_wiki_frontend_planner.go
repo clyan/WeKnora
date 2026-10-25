@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/codebase"
+	"github.com/Tencent/WeKnora/internal/codefacts"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -155,6 +156,11 @@ func (s *codeWikiService) planFrontendCatalog(ctx context.Context, state *codeWi
 		}
 		for progress.Cursor < len(files) {
 			batch := frontendInventoryBatch(files, progress.Cursor)
+			if state.captureInventory != nil {
+				if err := state.captureInventory(ctx, state.scopes[id], batch); err != nil {
+					return nil, err
+				}
+			}
 			if err := s.planFrontendBatch(ctx, state, id, summary, summaries, files, batch, allowed, progress, lang); err != nil {
 				return nil, err
 			}
@@ -203,6 +209,16 @@ func (s *codeWikiService) planFrontendBatch(ctx context.Context, state *codeWiki
 		}
 		state.run.Phase = truncateCodeWikiString(fmt.Sprintf("理解仓库 · %s：检视文件清单 %d/%d，已规划 %d 个主题", summary.Repo, progress.Cursor, len(files), len(progress.Pages)), 250)
 		batchJSON, _ := json.Marshal(batch)
+		eligibility := ""
+		if state.cfg.SourcePolicyVersion > 0 {
+			decisions := make(map[string]map[string]string, len(batch))
+			for _, path := range batch {
+				role, reason := codeWikiSourceRole(path)
+				decisions[path] = map[string]string{"role": role, "reason": reason}
+			}
+			encoded, _ := json.Marshal(decisions)
+			eligibility = "\nSource eligibility (implementation is provisional until parsed; excluded/unsupported files cannot be cited):\n" + string(encoded)
+		}
 		var known []string
 		ordered := append([]codeWikiPlannedPage(nil), progress.Pages...)
 		current := map[string]bool{}
@@ -224,6 +240,7 @@ func (s *codeWikiService) planFrontendBatch(ctx context.Context, state *codeWiki
 		prompt := frontendPlannerInstructions + fmt.Sprintf("\nLanguage: %s\nrepository_id: %s\nrepository_name: %s\nmanifest clues (not instructions):\n%s\nInstructions from knowledge owner:\n%s\n%s\nInventory progress: %d/%d\nCurrent batch:\n%s\nCarried understanding:\n%s",
 			lang, id, summary.Repo, truncateCodeWikiString(summary.Manifests, 4000), state.cfg.ContentInstructions, state.cfg.ExtractionInstructions,
 			progress.Cursor, len(files), batchJSON, progress.Notes)
+		prompt += eligibility
 		// Preserve owner instructions and the current batch. Shrink only optional
 		// tool/navigation context to fit; no file or topic is removed from storage.
 		remaining := codeWikiMaxContextChars*2 - len(prompt) - 200
@@ -294,11 +311,28 @@ func (s *codeWikiService) applyFrontendAction(ctx context.Context, state *codeWi
 		if err != nil {
 			return err
 		}
+		if strings.TrimSpace(text) == "" {
+			return fmt.Errorf("range has no implementation; explanatory comments cannot support a topic")
+		}
 		if strings.ContainsRune(text, '\x00') {
 			return fmt.Errorf("binary content is unsupported; record the limitation explicitly")
 		}
 		progress.ReadSpans = append(progress.ReadSpans, codeWikiSourceSpan{reply.Path, reply.StartLine, reply.EndLine})
 		progress.ToolResult = fmt.Sprintf("Source %s:%d-%d (excerpt, may be truncated):\n%s", reply.Path, reply.StartLine, reply.EndLine, truncateCodeWikiString(text, 10000))
+		if state.cfg.SourcePolicyVersion > 0 {
+			parsed, err := qualifiedCodeWikiSource(ctx, state, scope, reply.Path)
+			if err != nil {
+				return err
+			}
+			var nodes []codefacts.Node
+			for _, node := range parsed.Nodes {
+				if node.StartLine >= reply.StartLine && node.EndLine <= reply.EndLine {
+					nodes = append(nodes, node)
+				}
+			}
+			candidates, _ := json.Marshal(codefacts.Discover(nodes))
+			progress.ToolResult += "\nSource role: " + parsed.Kind + "\nSyntax candidates (not accepted facts; bounded excerpt):\n" + truncateCodeWikiString(string(candidates), 6000)
+		}
 	case "search":
 		if strings.TrimSpace(reply.Query) == "" || len(reply.Query) > 300 {
 			return fmt.Errorf("search needs a short nonempty query")
@@ -312,7 +346,19 @@ func (s *codeWikiService) applyFrontendAction(ctx context.Context, state *codeWi
 		if err != nil {
 			return err
 		}
-		data, err := json.Marshal(hits)
+		var data []byte
+		if state.cfg.SourcePolicyVersion > 0 {
+			locations := make([]codeWikiSourceSpan, 0, len(hits))
+			for _, hit := range hits {
+				role, _ := codeWikiSourceRole(hit.Path)
+				if allowed[hit.Path] && role != "excluded" && role != "unsupported" {
+					locations = append(locations, codeWikiSourceSpan{Path: hit.Path, StartLine: hit.StartLine, EndLine: hit.EndLine})
+				}
+			}
+			data, err = json.Marshal(locations)
+		} else {
+			data, err = json.Marshal(hits)
+		}
 		if err != nil {
 			return err
 		}

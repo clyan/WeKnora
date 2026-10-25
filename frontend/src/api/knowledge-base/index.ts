@@ -121,6 +121,7 @@ export function createKnowledgeBase(data: {
   // Code wiki KB settings (type='code_wiki' only). Generation model and
   // custom instructions reuse wiki_config above.
   code_wiki_config?: {
+    mode?: 'project' | 'domain';
     template_id?: string;
     languages?: string[];
     max_pages_per_run?: number;
@@ -160,6 +161,7 @@ export function updateKnowledgeBase(id: string, data: {
       extraction_instructions?: string;
     };
     code_wiki_config?: {
+      mode?: 'project' | 'domain';
       template_id?: string;
       languages?: string[];
       max_pages_per_run?: number;

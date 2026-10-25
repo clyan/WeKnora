@@ -141,6 +141,16 @@
                       </div>
 
                       <div v-if="isCodeWiki" class="form-item">
+                        <label class="form-label">{{ $t('codeWiki.mode.title') }}</label>
+                        <t-radio-group v-model="formData.codeWikiConfig.mode" :disabled="editorMode === 'edit'">
+                          <t-radio-button value="project">{{ $t('codeWiki.mode.project') }}</t-radio-button>
+                          <t-radio-button value="domain">{{ $t('codeWiki.mode.domain') }}</t-radio-button>
+                        </t-radio-group>
+                        <p class="form-tip">{{ $t(formData.codeWikiConfig.mode === 'domain' ? 'codeWiki.mode.domainHint' : 'codeWiki.mode.projectHint') }}</p>
+                        <p class="form-tip">{{ $t('codeWiki.mode.policy') }}</p>
+                      </div>
+
+                      <div v-if="isCodeWiki && formData.codeWikiConfig.mode === 'project'" class="form-item">
                         <label class="form-label">{{ $t('codeWiki.template.title') }}</label>
                         <p>{{ $t('codeWiki.template.frontend') }}</p>
                         <p class="form-tip">{{ $t('codeWiki.template.description') }}</p>
@@ -150,7 +160,7 @@
                         <p v-if="editorMode === 'edit'" class="form-tip">{{ $t('codeWiki.template.existingHint') }}</p>
                       </div>
 
-                      <div v-if="!isFAQ && formData.indexingStrategy.wikiEnabled" class="form-item">
+                      <div v-if="!isFAQ && formData.indexingStrategy.wikiEnabled && (!isCodeWiki || formData.codeWikiConfig.mode === 'project')" class="form-item">
                         <label class="form-label">{{ $t('knowledgeEditor.wiki.contentInstructionsLabel') }}</label>
                         <p class="form-tip">{{ $t('knowledgeEditor.wiki.contentInstructionsTip') }}</p>
                         <t-textarea
@@ -161,7 +171,7 @@
                         />
                       </div>
 
-                      <div v-if="!isFAQ && formData.indexingStrategy.wikiEnabled" class="form-item">
+                      <div v-if="!isFAQ && formData.indexingStrategy.wikiEnabled && (!isCodeWiki || formData.codeWikiConfig.mode === 'project')" class="form-item">
                         <label class="form-label">{{ $t('knowledgeEditor.wiki.extractionInstructionsLabel') }}</label>
                         <p class="form-tip">{{ $t('knowledgeEditor.wiki.extractionInstructionsTip') }}</p>
                         <t-textarea
@@ -726,7 +736,7 @@ const fillCodeWikiTemplate = () => {
   })
 }
 watch([isCodeWiki, codeWikiTemplate], () => {
-  if (editorMode.value === 'create' && isCodeWiki.value &&
+  if (editorMode.value === 'create' && isCodeWiki.value && formData.value.codeWikiConfig.mode === 'project' &&
       !formData.value.wikiConfig.contentInstructions && !formData.value.wikiConfig.extractionInstructions) {
     applyCodeWikiTemplate()
   }
@@ -858,6 +868,7 @@ const initFormData = (type: 'document' | 'faq' | 'code_wiki' = 'document') => {
       extractionInstructions: '',
     },
     codeWikiConfig: {
+      mode: 'project' as 'project' | 'domain',
       templateId: 'frontend_catalog_v1',
       languages: [] as string[],
       maxModelCallsPerRun: 0,
@@ -1010,6 +1021,7 @@ const loadKBData = async (
         extractionInstructions: kb.wiki_config?.extraction_instructions || '',
       },
       codeWikiConfig: {
+        mode: (kb.code_wiki_config?.mode || 'project') as 'project' | 'domain',
         templateId: kb.code_wiki_config?.template_id || 'frontend_catalog_v1',
         languages: kb.code_wiki_config?.languages || [],
         maxModelCallsPerRun: kb.code_wiki_config?.max_model_calls_per_run || 0,
@@ -1381,8 +1393,8 @@ const buildSubmitData = () => {
       synthesis_model_id: formData.value.modelConfig?.wikiSynthesisModelId || '',
       max_pages_per_ingest: formData.value.wikiConfig?.maxPagesPerIngest || 0,
       extraction_granularity: formData.value.wikiConfig?.extractionGranularity || 'standard',
-      content_instructions: formData.value.wikiConfig?.contentInstructions || '',
-      extraction_instructions: formData.value.wikiConfig?.extractionInstructions || '',
+      content_instructions: isCodeWiki.value && formData.value.codeWikiConfig.mode === 'domain' ? '' : formData.value.wikiConfig?.contentInstructions || '',
+      extraction_instructions: isCodeWiki.value && formData.value.codeWikiConfig.mode === 'domain' ? '' : formData.value.wikiConfig?.extractionInstructions || '',
     }
   }
 
@@ -1390,7 +1402,8 @@ const buildSubmitData = () => {
   // reuse wiki_config above (plan §3.1: 不维护两套相同设置).
   if (formData.value.type === 'code_wiki') {
     data.code_wiki_config = {
-      template_id: formData.value.codeWikiConfig?.templateId || 'frontend_catalog_v1',
+      mode: formData.value.codeWikiConfig.mode,
+      template_id: formData.value.codeWikiConfig.mode === 'domain' ? '' : formData.value.codeWikiConfig?.templateId || 'frontend_catalog_v1',
       languages: formData.value.codeWikiConfig?.languages || [],
       max_model_calls_per_run: formData.value.codeWikiConfig?.maxModelCallsPerRun || 0,
       run_timeout_minutes: formData.value.codeWikiConfig?.runTimeoutMinutes || 0,
@@ -1500,8 +1513,8 @@ const doSubmit = async () => {
           synthesis_model_id: formData.value.modelConfig?.wikiSynthesisModelId || '',
           max_pages_per_ingest: formData.value.wikiConfig.maxPagesPerIngest || 0,
           extraction_granularity: formData.value.wikiConfig.extractionGranularity || 'standard',
-          content_instructions: formData.value.wikiConfig.contentInstructions || '',
-          extraction_instructions: formData.value.wikiConfig.extractionInstructions || '',
+          content_instructions: data.wiki_config?.content_instructions || '',
+          extraction_instructions: data.wiki_config?.extraction_instructions || '',
         }
       }
       if (formData.value.type !== 'faq') {

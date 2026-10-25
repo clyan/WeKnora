@@ -9,8 +9,10 @@ ARG CODEBASE_MEMORY_VERSION=0.12.1
 # Portable builds support Debian 12's glibc. Keep indexes owned by the same
 # unprivileged user that runs WeKnora and the CLI.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates curl && \
+    apt-get install -y --no-install-recommends git ca-certificates curl nodejs npm && \
     rm -rf /var/lib/apt/lists/*
+RUN npm install --prefix /opt/weknora-code-analysis --ignore-scripts --no-audit --no-fund typescript@6.0.3 && \
+    node -e "if (require('/opt/weknora-code-analysis/node_modules/typescript').version !== '6.0.3') process.exit(1)"
 
 FROM codebase-base AS codebase-download
 RUN set -eu; \

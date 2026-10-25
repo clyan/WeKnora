@@ -151,16 +151,19 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 	}
 	kb.EnsureDefaults()
 	if kb.IsCodeWiki() {
-		if kb.CodeWikiConfig.TemplateID != types.CodeWikiFrontendTemplate {
+		if !types.IsValidCodeWikiMode(kb.CodeWikiConfig.Mode) {
+			return nil, apperrors.NewBadRequestError("unsupported code wiki mode")
+		}
+		if kb.CodeWikiConfig.EffectiveMode() == types.CodeWikiModeProject && kb.CodeWikiConfig.TemplateID != types.CodeWikiFrontendTemplate {
 			return nil, apperrors.NewBadRequestError("unsupported code wiki template")
 		}
 		if kb.WikiConfig == nil {
 			kb.WikiConfig = &types.WikiConfig{}
 		}
-		if kb.WikiConfig.ContentInstructions == "" {
+		if kb.CodeWikiConfig.EffectiveMode() == types.CodeWikiModeProject && kb.WikiConfig.ContentInstructions == "" {
 			kb.WikiConfig.ContentInstructions = types.CodeWikiFrontendContentInstructions
 		}
-		if kb.WikiConfig.ExtractionInstructions == "" {
+		if kb.CodeWikiConfig.EffectiveMode() == types.CodeWikiModeProject && kb.WikiConfig.ExtractionInstructions == "" {
 			kb.WikiConfig.ExtractionInstructions = types.CodeWikiFrontendExtractionInstructions
 		}
 	}
@@ -562,10 +565,16 @@ func (s *knowledgeBaseService) UpdateKnowledgeBase(ctx context.Context,
 			kb.WikiConfig = config.WikiConfig
 		}
 		if config.CodeWikiConfig != nil {
+			if !types.IsValidCodeWikiMode(config.CodeWikiConfig.Mode) {
+				return nil, apperrors.NewBadRequestError("unsupported code wiki mode")
+			}
+			if kb.IsCodeWiki() && kb.CodeWikiConfig.EffectiveMode() != config.CodeWikiConfig.EffectiveMode() {
+				return nil, apperrors.NewBadRequestError("知识库创建后不能切换项目/领域模式；请创建新的知识库")
+			}
 			// Only meaningful on code_wiki KBs; EnsureDefaults drops it
 			// elsewhere. Normalization clamps budgets into range.
 			config.CodeWikiConfig.Normalize()
-			if config.CodeWikiConfig.TemplateID != types.CodeWikiFrontendTemplate {
+			if config.CodeWikiConfig.EffectiveMode() == types.CodeWikiModeProject && config.CodeWikiConfig.TemplateID != types.CodeWikiFrontendTemplate {
 				return nil, apperrors.NewBadRequestError("unsupported code wiki template")
 			}
 			kb.CodeWikiConfig = config.CodeWikiConfig

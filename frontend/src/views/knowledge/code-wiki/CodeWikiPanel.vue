@@ -1,5 +1,9 @@
 <template>
   <div class="codewiki-panel">
+    <t-alert v-if="mode === 'domain'" theme="info" :title="$t('codeWiki.mode.domain')">
+      {{ $t('codeWiki.mode.domainHint') }}
+    </t-alert>
+    <template v-else>
     <div class="workspace-toolbar">
       <t-button variant="outline" size="small" @click="openTask()">
         <template #icon>
@@ -232,7 +236,7 @@
           <template v-if="activeRun && displayedRun?.id === activeRun.id">
             <!-- staged: publish, or discard the candidates -->
             <template v-if="activeRun.status === 'staged'">
-              <t-button size="small" theme="primary" :loading="actionPending" :disabled="!canEdit || actionPending || hasIncompletePages" @click="publishActiveRun">
+              <t-button size="small" theme="primary" :loading="actionPending" :disabled="!canEdit || actionPending || hasIncompletePages || activeRun.requires_source_rebuild" @click="publishActiveRun">
                 {{ $t('codeWiki.runs.publish') }}
               </t-button>
               <t-button variant="outline" size="small" :disabled="!canEdit || actionPending"
@@ -240,10 +244,10 @@
             </template>
             <!-- paused: resume or cancel -->
             <template v-else-if="activeRun.status === 'paused'">
-              <t-button v-if="impactPlan?.review_required" size="small" theme="primary" :disabled="!canEdit || actionPending" @click="approveImpact">
+              <t-button v-if="impactPlan?.review_required" size="small" theme="primary" :disabled="!canEdit || actionPending || activeRun.requires_source_rebuild" @click="approveImpact">
                 {{ $t('codeWiki.workspace.impactReviewAction') }}
               </t-button>
-              <t-button v-else size="small" theme="primary" :disabled="!canEdit || actionPending" @click="resumeActiveRun">
+              <t-button v-else size="small" theme="primary" :disabled="!canEdit || actionPending || activeRun.requires_source_rebuild" @click="resumeActiveRun">
                 {{ $t('codeWiki.runs.resume') }}
               </t-button>
               <t-button variant="outline" size="small" :disabled="!canEdit || actionPending"
@@ -264,12 +268,17 @@
         </div>
       </div>
 
+      <t-alert v-if="displayedRun?.requires_source_rebuild" theme="info" :message="$t('codeWiki.mode.rebuildHint')" />
+
       <!-- 活动批次进度：阶段文字而非百分比 -->
       <div v-if="displayedRun" :class="['run-progress', displayedRun.status]">
         <div class="run-progress-main">
           <t-tag size="small" variant="light" :theme="runStatusTheme(displayedRun.status)">
             {{ runStatusLabel(displayedRun.status) }}
           </t-tag>
+          <t-tooltip v-if="displayedRun.full_source_reanalysis" :content="$t('codeWiki.mode.fullAnalysisHint')">
+            <t-tag size="small" variant="outline">{{ $t('codeWiki.mode.fullAnalysis') }}</t-tag>
+          </t-tooltip>
           <span class="run-phase" role="status" :aria-busy="isWorking">
             <t-loading v-if="isWorking" size="14px" />
             {{ displayedRun.phase || runStatusLabel(displayedRun.status) }}
@@ -422,6 +431,7 @@
     <!-- Provider 配置弹窗 -->
     <CodeWikiProviderDialog v-model:visible="providerDialogVisible" :knowledge-base-id="knowledgeBaseId"
       :profile="profile" @saved="onProviderSaved" />
+    </template>
   </div>
 </template>
 
@@ -461,6 +471,7 @@ const props = defineProps<{
   knowledgeBaseId: string
   canEdit: boolean
   showSources?: boolean
+  mode?: 'project' | 'domain'
 }>()
 
 const exportingOKF = ref(false)
@@ -771,6 +782,7 @@ const loadGitlabSources = async () => {
 }
 
 const refreshAll = async () => {
+  if (props.mode === 'domain') return
   await Promise.all([loadProfile(), loadRepositories(), loadRuns(), loadGitlabSources()])
   await loadRunDetail()
 }
@@ -791,6 +803,7 @@ watch(() => displayedRun.value?.id, () => {
 
 let polling = false
 onMounted(() => {
+  if (props.mode === 'domain') return
   refreshAll()
   // Discover work started in another tab and retain observation while the
   // source pane is hidden; never overlap polling batches.

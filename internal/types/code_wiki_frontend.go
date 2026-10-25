@@ -5,9 +5,9 @@ package types
 const CodeWikiDirectoryVersionFrontend = 2
 const CodeWikiFrontendTemplate = "frontend_catalog_v1"
 
-const CodeWikiFrontendContentInstructions = `先阅读真实源码，理解项目入口、技术栈和组织方式，再按有证据的知识主题组织页面、API、组件、架构、前端流程、规范、参考资料与待澄清问题。目录名称不是分类依据；一个主题可关联多个文件，一个文件可包含多个主题，不必填满所有类型。先说明用途与入口，再用操作、参数、状态和关联表格展开，链接已有知识条目。仅描述提供源码能够证明的当前实现；前端接口调用与后端实现分开，缺失证据写为待确认。`
+const CodeWikiFrontendContentInstructions = `从当前代码建立知识基线，只写能从实现及使用关系查证的事实。先识别项目入口、操作、调用与条件，再组织页面、API、组件、架构、流程、规范和待澄清问题；最后汇总概览。目录名不决定分类，一个主题可跨文件，一个文件可有多个主题，不填充空类型。先说明用途与入口，再用操作、参数、状态及关联表格展开。README、已有文档、注释、Mock和样例不作为业务依据；不确定业务含义交由人工澄清，人工解释与代码事实分开。`
 
-const CodeWikiFrontendExtractionInstructions = `页面：路由、操作、表单校验、显示/禁用条件、状态变化、接口调用和跳转。API：回到真实调用点确认参数、响应字段和异常处理，标注前端调用视角及 Mock。组件：职责、输入、事件、内部状态、依赖和使用位置。架构：应用边界、路由、权限、状态管理、请求封装；仅在实际存在时分析主子应用通信。规范只提取代码或资料已有约定。不可访问的依赖止于调用边界，不推断服务端权限、数据库和事务。`
+const CodeWikiFrontendExtractionInstructions = `页面：从实际注册和挂载追踪按钮、菜单、行操作、表单及自动触发，记录校验、显示/禁用条件、状态、请求、跳转与异常。API：逐调用点追踪参数构造、字段来源、展开/默认值/条件转换、实际响应使用和错误处理；区分类型声明与真实传入。组件：输入、事件、暴露方法、状态、实际使用位置。架构：仅描述有实现依据的应用边界、路由、权限、状态和请求机制，不把包集成写成微前端。规范区分代码配置与观察到的写法，不采用文档或注释约定。动态边界、不可访问依赖及未确认业务含义进入问题，不推断后端或线上行为。`
 
 func CodeWikiFrontendCategories() []CodeWikiDirectoryCategory {
 	return []CodeWikiDirectoryCategory{

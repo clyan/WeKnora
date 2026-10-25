@@ -3472,6 +3472,15 @@ export default {
     attachmentStillProcessing: '附件 {name} 仍在解析，请稍候'
   },
   codeWiki: {
+    mode: {
+      title: '知识库模式', project: '项目代码知识', domain: '领域知识',
+      projectHint: '从当前实现提取页面、操作、接口参数和依赖，建立代码知识基线。',
+      domainHint: '引用已发布的项目事实，拼接跨系统业务链路。领域生成将在后续阶段开放。',
+      rebuildHint: '此任务使用旧的来源规则，可继续查看。活动任务请先停止，再新建任务从当前源码重新分析；旧内容不会自动删除或发布。',
+      fullAnalysis: '全范围分析',
+      fullAnalysisHint: '重新分析本次配置范围内的源码，生成候选供对比审阅；当前尚未启用精确增量分析。',
+      policy: '只采用代码可查证的事实；文档、注释和 Mock 不作为业务依据，未知含义交由人工澄清。',
+    },
     template: {
       title: '知识组织模板',
       frontend: '前端代码知识目录',

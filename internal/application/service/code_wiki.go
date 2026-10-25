@@ -375,6 +375,12 @@ func (s *codeWikiService) DeleteRepository(ctx context.Context, kbID, id string)
 // validateBindingRequest normalizes and validates the request's source
 // reference and filters, returning the resolved data source.
 func (s *codeWikiService) validateBindingRequest(ctx context.Context, kb *types.KnowledgeBase, req *types.CodeWikiRepositoryUpsertRequest) (*types.DataSource, types.StringArray, types.StringArray, error) {
+	if !types.IsValidCodeWikiMode(kb.CodeWikiConfig.EffectiveMode()) {
+		return nil, nil, nil, apperrors.NewBadRequestError("未知的知识库生成模式")
+	}
+	if kb.CodeWikiConfig.EffectiveMode() == types.CodeWikiModeDomain {
+		return nil, nil, nil, apperrors.NewBadRequestError("领域知识库引用项目知识库的已发布事实，不能直接绑定代码仓库")
+	}
 	if strings.TrimSpace(req.ProjectID) == "" {
 		return nil, nil, nil, apperrors.NewBadRequestError("project_id is required")
 	}

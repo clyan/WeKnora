@@ -16,10 +16,12 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/agent"
 	"github.com/Tencent/WeKnora/internal/codebase"
+	"github.com/Tencent/WeKnora/internal/codefacts"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 )
@@ -38,6 +40,11 @@ import (
 // creation and is the ONLY source of generation inputs for the worker — a
 // later config edit cannot change what an in-flight run produces.
 type codeWikiRunConfig struct {
+	Mode                   string                                   `json:"mode,omitempty"`
+	SourcePolicyVersion    int                                      `json:"source_policy_version,omitempty"`
+	FactSchemaVersion      int                                      `json:"fact_schema_version,omitempty"`
+	SourceAnalyzerVersion  string                                   `json:"source_analyzer_version,omitempty"`
+	FullSourceReanalysis   bool                                     `json:"full_source_reanalysis,omitempty"`
 	FrontendPlannerVersion int                                      `json:"frontend_planner_version,omitempty"`
 	FrontendPlanReady      bool                                     `json:"frontend_plan_ready,omitempty"`
 	FrontendPlanning       *codeWikiFrontendPlanning                `json:"frontend_planning,omitempty"`
@@ -107,6 +114,15 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 	kb, err := s.requireCodeWikiKB(ctx, kbID)
 	if err != nil {
 		return nil, err
+	}
+	if !types.IsValidCodeWikiMode(kb.CodeWikiConfig.EffectiveMode()) {
+		return nil, apperrors.NewBadRequestError("未知的知识库生成模式")
+	}
+	if kb.CodeWikiConfig.EffectiveMode() == types.CodeWikiModeDomain {
+		return nil, apperrors.NewBadRequestError("领域知识生成尚未开放；需要已发布的项目事实来源，不支持直接分析仓库")
+	}
+	if err := codefacts.CheckRuntime(ctx); err != nil {
+		return nil, apperrors.NewBadRequestError("源码分析运行时不可用，请检查平台的 Node.js 和 TypeScript 6.0.3 安装：" + err.Error())
 	}
 	if active, err := s.repo.ActiveRun(ctx, kbID); err != nil {
 		return nil, err
@@ -204,6 +220,11 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 		extractionInstructions = kb.WikiConfig.ExtractionInstructions
 	}
 	frozen := codeWikiRunConfig{
+		Mode:                   types.CodeWikiModeProject,
+		SourcePolicyVersion:    types.CodeWikiSourcePolicyVersion,
+		FactSchemaVersion:      types.CodeWikiFactSchemaVersion,
+		SourceAnalyzerVersion:  types.CodeWikiSourceAnalyzerVersion,
+		FullSourceReanalysis:   true, // Relation-driven impact analysis is not available yet.
 		FrontendPlannerVersion: 1,
 		SnapshotReferences:     references,
 		DirectoryVersion:       types.CodeWikiDirectoryVersionFrontend,
@@ -260,18 +281,22 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 		if err := json.Unmarshal(published.ConfigSnapshot, &prior); err != nil {
 			return nil, err
 		}
-		if err := s.verifyCodeWikiSnapshotReferences(ctx, kbID, baseline, prior.SnapshotReferences); err != nil {
-			return nil, err
-		}
-		if sameCodeWikiGenerationInputs(published, synthesisModelID, profile.ConfigVersion, frozen, baseline, entries) {
-			// No new run, generation calls, revisions, evidence or page writes.
-			result := *published
-			result.NoChanges = true
-			return &result, nil
-		}
-		frozen.SourceChanges, err = s.compareCodeWikiSnapshots(ctx, kbID, baseline, entries)
-		if err != nil {
-			return nil, fmt.Errorf("cannot verify joint snapshot diff: %w", err)
+		// Old publications remain readable and protected by CAS, but their
+		// source snapshots, notes and evidence cannot seed the new policy.
+		if validateCodeWikiRunPolicy(prior) == nil {
+			if err := s.verifyCodeWikiSnapshotReferences(ctx, kbID, baseline, prior.SnapshotReferences); err != nil {
+				return nil, err
+			}
+			if sameCodeWikiGenerationInputs(published, synthesisModelID, profile.ConfigVersion, frozen, baseline, entries) {
+				// No new run, generation calls, revisions, evidence or page writes.
+				result := *published
+				result.NoChanges = true
+				return &result, nil
+			}
+			frozen.SourceChanges, err = s.compareCodeWikiSnapshots(ctx, kbID, baseline, entries)
+			if err != nil {
+				return nil, fmt.Errorf("cannot verify joint snapshot diff: %w", err)
+			}
 		}
 	}
 	rawPages, err := s.repo.ListRawWikiPages(ctx, kbID)
@@ -282,13 +307,13 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 	if published != nil {
 		frozen.PublicationGuard.BaselineRunID = published.ID
 		frozen.PublicationGuard.PlanToken = uuid.NewString()
-		frozen.PublicationGuard.ReviewRequired = true
+		frozen.PublicationGuard.ReviewRequired = !frozen.FullSourceReanalysis
 		frozen.PublicationGuard.Sections = make(map[string][]types.CodeWikiSection)
 	}
 	for _, page := range rawPages {
 		frozen.PublicationGuard.Pages[page.Slug] = types.CodeWikiPageFingerprint(page)
 		frozen.PublicationGuard.AllowedPages = append(frozen.PublicationGuard.AllowedPages, page.Slug)
-		if published != nil && page.LastEditSource != types.WikiEditSourceUser && page.LastEditSource != types.WikiEditSourceRevert {
+		if published != nil && !frozen.FullSourceReanalysis && page.LastEditSource != types.WikiEditSourceUser && page.LastEditSource != types.WikiEditSourceRevert {
 			sections, err := types.CodeWikiSections(page.Content)
 			if err != nil {
 				return nil, fmt.Errorf("page %s requires section migration: %w", page.Slug, err)
@@ -354,7 +379,9 @@ func (s *codeWikiService) GetRun(ctx context.Context, kbID, runID string) (*type
 	if _, err := s.requireCodeWikiKB(ctx, kbID); err != nil {
 		return nil, err
 	}
-	return s.repo.GetRun(ctx, kbID, runID)
+	run, err := s.repo.GetRun(ctx, kbID, runID)
+	markCodeWikiSourceCompatibility(run)
+	return run, err
 }
 
 // GetRunDetail returns the run with its frozen manifest and staged pages.
@@ -409,6 +436,7 @@ func (s *codeWikiService) GetRunDetail(ctx context.Context, kbID, runID string) 
 			}
 		}
 	}
+	markCodeWikiSourceCompatibility(run)
 	return run, manifest, pages, nil
 }
 
@@ -416,7 +444,11 @@ func (s *codeWikiService) ListRuns(ctx context.Context, kbID string) ([]*types.C
 	if _, err := s.requireCodeWikiKB(ctx, kbID); err != nil {
 		return nil, err
 	}
-	return s.repo.ListRuns(ctx, kbID, 50)
+	runs, err := s.repo.ListRuns(ctx, kbID, 50)
+	for _, run := range runs {
+		markCodeWikiSourceCompatibility(run)
+	}
+	return runs, err
 }
 
 // CancelRun flags cancellation; the worker observes the flag between stages
@@ -526,6 +558,9 @@ func (s *codeWikiService) ResumeRun(ctx context.Context, kbID, runID string) err
 	if err := json.Unmarshal(run.ConfigSnapshot, &cfg); err != nil {
 		return fmt.Errorf("decode frozen config: %w", err)
 	}
+	if err := validateCodeWikiRunPolicy(cfg); err != nil {
+		return apperrors.NewBadRequestError(err.Error())
+	}
 	if cfg.PublicationGuard != nil && cfg.PublicationGuard.ReviewRequired &&
 		(cfg.DirectoryVersion != types.CodeWikiDirectoryVersionFrontend || cfg.FrontendPlanReady) {
 		return apperrors.NewBadRequestError("review the joint impact plan before resuming")
@@ -560,6 +595,9 @@ func (s *codeWikiService) RetryRun(ctx context.Context, kbID, runID string) (*ty
 // --- Generation worker ------------------------------------------------------
 
 type codeWikiRunState struct {
+	qualifiedSources  map[string]*codefacts.Result
+	captureSource     func(context.Context, codebase.SnapshotScope, string, string, string, *codefacts.Result) error
+	captureInventory  func(context.Context, codebase.SnapshotScope, []string) error
 	modelCallsAtStart int
 	checkpoint        func(context.Context) error
 	activity          func(context.Context, string, string)
@@ -713,11 +751,24 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 	if err := json.Unmarshal(run.ConfigSnapshot, &cfg); err != nil {
 		return fmt.Errorf("decode frozen config: %w", err)
 	}
+	if err := validateCodeWikiRunPolicy(cfg); err != nil {
+		return err
+	}
 	state := &codeWikiRunState{
 		run:               run,
 		cfg:               cfg,
 		builtin:           s.registry.Builtin(),
 		modelCallsAtStart: run.ModelCalls,
+	}
+	factRepo, ok := s.repo.(interfaces.CodeWikiFactRepository)
+	if !ok {
+		return fmt.Errorf("源码事实仓储不可用，不能回退为旧正文生成")
+	}
+	state.captureSource = func(ctx context.Context, scope codebase.SnapshotScope, path, role, reason string, result *codefacts.Result) error {
+		return captureCodeWikiSourceFacts(ctx, factRepo, state, scope, path, role, reason, result)
+	}
+	state.captureInventory = func(ctx context.Context, scope codebase.SnapshotScope, files []string) error {
+		return captureCodeWikiInventory(ctx, factRepo, state, scope, files)
 	}
 	state.checkpoint = func(saveCtx context.Context) error {
 		blob, err := json.Marshal(state.cfg)
@@ -854,7 +905,11 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		s.setRunPhase(ctx, run, types.CodeWikiRunStatusGenerating,
 			fmt.Sprintf("继续生成（剩余 %d/%d 页）", len(pagesToGenerate), len(pages)))
 	} else {
-		s.setRunPhase(ctx, run, types.CodeWikiRunStatusPlanning, "理解仓库并规划知识目录")
+		phase := "理解仓库并规划知识目录"
+		if state.cfg.FullSourceReanalysis {
+			phase = "从当前源码重新分析知识目录（全范围分析，非精确增量）"
+		}
+		s.setRunPhase(ctx, run, types.CodeWikiRunStatusPlanning, phase)
 		pages, err = s.planOutline(ctx, state, repoSummaries, lang)
 		if err != nil {
 			return err
@@ -882,7 +937,9 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 					page.BaselineVersion, page.BaselineSource = live.Version, live.LastEditSource
 					page.CategoryPath, page.PageType = live.CategoryPath, live.PageType
 					page.SortOrder = live.SortOrder
-					page.Summary = live.Summary
+					if !state.cfg.FullSourceReanalysis {
+						page.Summary = live.Summary
+					}
 				}
 			}
 			blob, err := json.Marshal(state.cfg)
@@ -1120,6 +1177,14 @@ func (s *codeWikiService) analyzeRepositories(ctx context.Context, state *codeWi
 		// Manifest files from the LOCAL snapshot (read-only, bounded).
 		var manifestLines []string
 		for _, name := range codeWikiManifestFiles {
+			if state.cfg.SourcePolicyVersion > 0 {
+				result, err := qualifiedCodeWikiSource(ctx, state, scope, name)
+				if err != nil {
+					continue
+				}
+				manifestLines = append(manifestLines, fmt.Sprintf("[%s; configuration declaration]\n%s", name, truncateCodeWikiString(result.Source, 4000)))
+				continue
+			}
 			if info, err := os.Stat(filepath.Join(scope.LocalPath, name)); err != nil || !info.Mode().IsRegular() {
 				continue
 			}
@@ -1148,7 +1213,7 @@ func (s *codeWikiService) analyzeRepositories(ctx context.Context, state *codeWi
 // Legacy versions retain their historical planner for restoring old runs.
 func (s *codeWikiService) planOutline(ctx context.Context, state *codeWikiRunState, summaries map[string]*codeWikiRepoSummary, lang string) ([]codeWikiPlannedPage, error) {
 	if state.cfg.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend &&
-		(state.cfg.PublicationGuard == nil || state.cfg.PublicationGuard.BaselineRunID == "") {
+		(state.cfg.FullSourceReanalysis || state.cfg.PublicationGuard == nil || state.cfg.PublicationGuard.BaselineRunID == "") {
 		return s.planFrontendCatalog(ctx, state, summaries, lang)
 	}
 	if guard := state.cfg.PublicationGuard; guard != nil && guard.BaselineRunID != "" {
@@ -1667,6 +1732,17 @@ func codeWikiEvidenceQueries(page codeWikiPlannedPage) []string {
 func (s *codeWikiService) readSource(ctx context.Context, state *codeWikiRunState, scope codebase.SnapshotScope, path string, start, end int) (content string, readErr error) {
 	done := state.beginActivity(ctx, fmt.Sprintf("阅读源码 · %s · %s:%d–%d", state.repositoryLabel(scope.RepositoryID), path, start, end))
 	defer func() { done(readErr) }()
+	if state.cfg.SourcePolicyVersion > 0 {
+		result, err := qualifiedCodeWikiSource(ctx, state, scope, path)
+		if err != nil {
+			return "", err
+		}
+		lines := strings.Split(result.Source, "\n")
+		if start < 1 || end < start || end > len(lines) {
+			return "", fmt.Errorf("source range outside filtered implementation")
+		}
+		return strings.Join(lines[start-1:end], "\n"), nil
+	}
 	// Provider search results locate evidence; supplied local source bytes
 	// remain authoritative even when a remote snippet differs.
 	if scope.LocalPath != "" {
@@ -1713,6 +1789,18 @@ func (s *codeWikiService) validateCitations(ctx context.Context, state *codeWiki
 			valid[spec.ID] = false
 			problems = append(problems, fmt.Sprintf("%s %s: %v", spec.ID, spec.Path, err))
 			continue
+		}
+		if state.cfg.SourcePolicyVersion > 0 {
+			result, err := qualifiedCodeWikiSource(ctx, state, scope, spec.Path)
+			if err != nil {
+				problems = append(problems, spec.ID+" 来源不符合当前事实政策")
+				continue
+			}
+			lines := strings.Split(result.Source, "\n")
+			if strings.TrimSpace(strings.Join(lines[spec.StartLine-1:spec.EndLine], "\n")) == "" {
+				problems = append(problems, spec.ID+" 引用仅包含注释或空白")
+				continue
+			}
 		}
 		valid[spec.ID] = true
 	}
@@ -1837,8 +1925,12 @@ func (s *codeWikiService) callModel(ctx context.Context, state *codeWikiRunState
 	if len(prompt) > codeWikiMaxContextChars*2 {
 		return "", fmt.Errorf("generation context exceeds limit; narrow the evidence scope")
 	}
+	policy := "You are a precise technical documentation generator. Follow the evidence protocol strictly."
+	if state.cfg.SourcePolicyVersion > 0 {
+		policy += "\n" + types.CodeWikiSourceFactPolicy
+	}
 	messages := []chat.Message{
-		{Role: "system", Content: "You are a precise technical documentation generator. Follow the evidence protocol strictly."},
+		{Role: "system", Content: policy},
 		{Role: "user", Content: prompt},
 	}
 	var lastErr error

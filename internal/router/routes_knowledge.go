@@ -291,6 +291,7 @@ func RegisterCodeWikiRoutes(r *gin.RouterGroup, codeWikiHandler *handler.CodeWik
 		cw.POST("/runs", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.CreateRun)
 		cw.GET("/runs/:id", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.GetRun)
 		cw.GET("/runs/:id/events", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListRunEvents)
+		cw.GET("/runs/:id/facts", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListFactRecords)
 		cw.POST("/runs/:id/impact-review", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.ApproveRunImpact)
 		cw.POST("/runs/:id/cancel", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.CancelRun)
 		cw.POST("/runs/:id/pause", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.PauseRun)

@@ -2670,6 +2670,15 @@ export default {
     defaultLocaleBrowser: 'Browser / host default'
   },
   codeWiki: {
+    mode: {
+      title: 'Knowledge mode', project: 'Project code', domain: 'Domain knowledge',
+      projectHint: 'Build a code baseline from implementation, operations, request parameters and dependencies.',
+      domainHint: 'Connect published project facts into cross-system journeys. Domain generation will be available in a later phase.',
+      rebuildHint: 'This task uses older evidence rules and remains readable. Stop an active task, then create a new one to analyze current source. Existing content is not automatically deleted or published.',
+      fullAnalysis: 'Full analysis',
+      fullAnalysisHint: 'Reanalyzes source within this run’s configured scope and stages content for comparison and review. Precise incremental analysis is not available yet.',
+      policy: 'Only code-supported facts are accepted. Documents, comments and mocks are not business evidence; unknown meanings require clarification.',
+    },
     template: {
       title: 'Knowledge template',
       frontend: 'Frontend code knowledge catalog',

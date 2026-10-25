@@ -90,6 +90,7 @@ const (
 // provider selection lives in code_wiki_analysis_profiles; the version
 // reference below is a denormalized display/freeze pointer only.
 type CodeWikiConfig struct {
+	Mode       string `yaml:"mode,omitempty" json:"mode,omitempty"`
 	TemplateID string `yaml:"template_id,omitempty" json:"template_id,omitempty"`
 	// Languages hints the analysis and generation prompts (e.g. ["zh"], ["en"]).
 	// Empty = follow request language.
@@ -160,7 +161,10 @@ func (c *CodeWikiConfig) Normalize() {
 	if c == nil {
 		return
 	}
-	if c.TemplateID == "" {
+	if c.Mode == "" {
+		c.Mode = CodeWikiModeProject
+	}
+	if c.Mode == CodeWikiModeProject && c.TemplateID == "" {
 		c.TemplateID = CodeWikiFrontendTemplate
 	}
 	if c.MaxPagesPerRun > MaxCodeWikiPagesPerRunHardCap {
@@ -326,7 +330,7 @@ type CodeWikiToolMapping struct {
 // tool response. Every value is a dotted JSON path (empty = not provided).
 type CodeWikiMappingOutput struct {
 	// ResultsPath points at the array of hits ("hits.items").
-	ResultsPath string `json:"results_path,omitempty"`
+	ResultsPath    string `json:"results_path,omitempty"`
 	PathField      string `json:"path,omitempty"`
 	StartLineField string `json:"start_line,omitempty"`
 	EndLineField   string `json:"end_line,omitempty"`
@@ -376,8 +380,8 @@ func IsValidCodeWikiDelivery(delivery string) bool {
 // profiles reference a tenant MCP service that owns auth, timeouts and
 // tool enable/approval policy.
 type CodeWikiAnalysisProfile struct {
-	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID uint64 `json:"tenant_id" gorm:"index"`
+	ID              string `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID        uint64 `json:"tenant_id" gorm:"index"`
 	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);uniqueIndex"`
 	// Provider kind: builtin_codebase | custom_mcp
 	ProviderKind string `json:"provider_kind" gorm:"type:varchar(32);default:'builtin_codebase'"`
@@ -398,10 +402,10 @@ type CodeWikiAnalysisProfile struct {
 	// MeetsMinimum mirrors CapabilityCheck.MeetsMinimum for cheap filtering.
 	MeetsMinimum bool `json:"meets_minimum" gorm:"default:false"`
 	// ConfigVersion increments on every provider/mapping change.
-	ConfigVersion int `json:"config_version" gorm:"default:1"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
+	ConfigVersion int            `json:"config_version" gorm:"default:1"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `json:"deleted_at" gorm:"index"`
 }
 
 // TableName specifies the database table name.
@@ -467,12 +471,12 @@ type CodeWikiRepository struct {
 	// Latest successful snapshot for quick display
 	LastSnapshotID *string `json:"last_snapshot_id,omitempty" gorm:"type:varchar(36)"`
 	// Commit SHA of the latest successful snapshot
-	LastCommitSHA string `json:"last_commit_sha,omitempty" gorm:"type:varchar(64)"`
+	LastCommitSHA string     `json:"last_commit_sha,omitempty" gorm:"type:varchar(64)"`
 	LastSyncAt    *time.Time `json:"last_sync_at,omitempty"`
 	// Last sync error message (empty when status != error)
-	ErrorMessage string `json:"error_message,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ErrorMessage string         `json:"error_message,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `json:"deleted_at" gorm:"index"`
 }
 
@@ -486,8 +490,8 @@ func (CodeWikiRepository) TableName() string { return "code_wiki_repositories" }
 // different providers without touching each other's products.
 type CodeWikiSnapshot struct {
 	// Unique identifier (UUID)
-	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID uint64 `json:"tenant_id" gorm:"index"`
+	ID              string `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID        uint64 `json:"tenant_id" gorm:"index"`
 	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
 	// Owning repository binding
 	RepositoryID string `json:"repository_id" gorm:"type:varchar(36);index"`
@@ -502,9 +506,9 @@ type CodeWikiSnapshot struct {
 	// Number of files retained after filtering
 	FileCount int `json:"file_count"`
 	// Total bytes of retained files
-	TotalSizeBytes int64 `json:"total_size_bytes"`
-	CreatedAt time.Time `json:"created_at"`
-	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
+	TotalSizeBytes int64          `json:"total_size_bytes"`
+	CreatedAt      time.Time      `json:"created_at"`
+	DeletedAt      gorm.DeletedAt `json:"deleted_at" gorm:"index"`
 }
 
 // TableName specifies the database table name.
@@ -524,12 +528,12 @@ const (
 // or mappings creates new artifacts; old artifacts (and the documents that
 // cite them) keep resolving.
 type CodeWikiAnalysisArtifact struct {
-	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID uint64 `json:"tenant_id" gorm:"index"`
+	ID              string `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID        uint64 `json:"tenant_id" gorm:"index"`
 	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
 	// Repository binding and analyzed snapshot
 	RepositoryID string `json:"repository_id" gorm:"type:varchar(36);index"`
-	SnapshotID string `json:"snapshot_id" gorm:"type:varchar(36);index"`
+	SnapshotID   string `json:"snapshot_id" gorm:"type:varchar(36);index"`
 	// Profile config version this artifact was prepared under
 	ProfileVersion int `json:"profile_version"`
 	// Engine version reported by the provider (CLI version, service version)
@@ -542,9 +546,9 @@ type CodeWikiAnalysisArtifact struct {
 	// Status: pending | preparing | ready | failed
 	Status string `json:"status" gorm:"type:varchar(32);default:'pending'"`
 	// Prepare/verify error message
-	ErrorMessage string `json:"error_message,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // TableName specifies the database table name.
@@ -588,10 +592,12 @@ func IsTerminalCodeWikiRunStatus(status string) bool {
 // status=published (partial unique index).
 type CodeWikiRun struct {
 	// NoChanges is response-only: identical published inputs need no new run.
-	NoChanges bool `json:"no_changes,omitempty" gorm:"-"`
+	NoChanges             bool `json:"no_changes,omitempty" gorm:"-"`
+	RequiresSourceRebuild bool `json:"requires_source_rebuild,omitempty" gorm:"-"`
+	FullSourceReanalysis  bool `json:"full_source_reanalysis,omitempty" gorm:"-"`
 	// Unique identifier (UUID)
-	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID uint64 `json:"tenant_id" gorm:"index"`
+	ID              string `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID        uint64 `json:"tenant_id" gorm:"index"`
 	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
 	// Run status (see CodeWikiRunStatus*)
 	Status string `json:"status" gorm:"type:varchar(32);default:'pending';index"`
@@ -609,11 +615,11 @@ type CodeWikiRun struct {
 	// silently change what an in-flight or historical run produced.
 	ConfigSnapshot JSON `json:"config_snapshot,omitempty" gorm:"type:jsonb"`
 	// Progress counters (stage-based, not fake percentages)
-	TotalPages int `json:"total_pages"`
+	TotalPages     int `json:"total_pages"`
 	CompletedPages int `json:"completed_pages"`
-	FailedPages int `json:"failed_pages"`
+	FailedPages    int `json:"failed_pages"`
 	// Actual budget consumption
-	ModelCalls int `json:"model_calls"`
+	ModelCalls int   `json:"model_calls"`
 	TokensUsed int64 `json:"tokens_used"`
 	// Error message when status=failed
 	ErrorMessage string `json:"error_message,omitempty"`
@@ -627,13 +633,13 @@ type CodeWikiRun struct {
 	IdempotencyKey string `json:"idempotency_key,omitempty" gorm:"type:varchar(128);index"`
 	// LeaseOwner identifies the worker process holding this run;
 	// LeaseExpiresAt bounds recovery after a crashed worker.
-	LeaseOwner string `json:"lease_owner,omitempty" gorm:"type:varchar(128)"`
+	LeaseOwner     string     `json:"lease_owner,omitempty" gorm:"type:varchar(128)"`
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
-	StartedAt *time.Time `json:"started_at,omitempty"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	PublishedAt *time.Time `json:"published_at,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	PublishedAt    *time.Time `json:"published_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // TableName specifies the database table name.
@@ -644,28 +650,28 @@ func (CodeWikiRun) TableName() string { return "code_wiki_runs" }
 // enabled repository was excluded — why. During generation the run never
 // follows the branch forward; the snapshot is the analysis input.
 type CodeWikiRunRepository struct {
-	Ref string `json:"ref,omitempty" gorm:"-"`
-	FilterHash string `json:"filter_hash,omitempty" gorm:"-"`
-	IncludePaths StringArray `json:"include_paths,omitempty" gorm:"-"`
+	Ref             string      `json:"ref,omitempty" gorm:"-"`
+	FilterHash      string      `json:"filter_hash,omitempty" gorm:"-"`
+	IncludePaths    StringArray `json:"include_paths,omitempty" gorm:"-"`
 	ExcludePatterns StringArray `json:"exclude_patterns,omitempty" gorm:"-"`
-	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID uint64 `json:"tenant_id" gorm:"index"`
-	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
-	RunID string `json:"run_id" gorm:"type:varchar(36);index"`
-	RepositoryID string `json:"repository_id" gorm:"type:varchar(36)"`
-	SnapshotID string `json:"snapshot_id,omitempty" gorm:"type:varchar(36)"`
+	ID              string      `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID        uint64      `json:"tenant_id" gorm:"index"`
+	KnowledgeBaseID string      `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
+	RunID           string      `json:"run_id" gorm:"type:varchar(36);index"`
+	RepositoryID    string      `json:"repository_id" gorm:"type:varchar(36)"`
+	SnapshotID      string      `json:"snapshot_id,omitempty" gorm:"type:varchar(36)"`
 	// ArtifactID references the analysis product used for this repo in this
 	// run (empty when the repository was excluded).
-	ArtifactID string `json:"artifact_id,omitempty" gorm:"type:varchar(36)"`
-	Role string `json:"role" gorm:"type:varchar(32)"`
+	ArtifactID  string `json:"artifact_id,omitempty" gorm:"type:varchar(36)"`
+	Role        string `json:"role" gorm:"type:varchar(32)"`
 	DisplayName string `json:"display_name" gorm:"type:varchar(512)"`
-	CommitSHA string `json:"commit_sha,omitempty" gorm:"type:varchar(64)"`
+	CommitSHA   string `json:"commit_sha,omitempty" gorm:"type:varchar(64)"`
 	// Excluded records an enabled repository that could not join this run
 	// (e.g. artifact not ready); ExcludeReason is user-facing. The
 	// generation result must surface the actual scope, never silently omit.
-	Excluded bool `json:"excluded" gorm:"default:false"`
-	ExcludeReason string `json:"exclude_reason,omitempty" gorm:"type:varchar(512)"`
-	CreatedAt time.Time `json:"created_at"`
+	Excluded      bool      `json:"excluded" gorm:"default:false"`
+	ExcludeReason string    `json:"exclude_reason,omitempty" gorm:"type:varchar(512)"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // TableName specifies the database table name.
@@ -673,11 +679,11 @@ func (CodeWikiRunRepository) TableName() string { return "code_wiki_run_reposito
 
 // Run page staging status values.
 const (
-	CodeWikiRunPageStatusPending   = "pending"  // planned, not yet generated (persisted plan)
+	CodeWikiRunPageStatusPending   = "pending" // planned, not yet generated (persisted plan)
 	CodeWikiRunPageStatusStaged    = "staged"
 	CodeWikiRunPageStatusConflict  = "conflict" // live page edited since baseline
 	CodeWikiRunPageStatusPublished = "published"
-	CodeWikiRunPageStatusSkipped   = "skipped" // dropped by user choice at publish
+	CodeWikiRunPageStatusSkipped   = "skipped"   // dropped by user choice at publish
 	CodeWikiRunPageStatusPreserved = "preserved" // unchanged page, no live-row/evidence write
 )
 
@@ -689,18 +695,18 @@ const (
 // page is marked conflict and the batch publish pauses).
 type CodeWikiRunPage struct {
 	PlanMetadata JSON `json:"plan_metadata,omitempty" gorm:"type:jsonb"`
-	SortOrder int `json:"sort_order" gorm:"default:0"`
+	SortOrder    int  `json:"sort_order" gorm:"default:0"`
 	// Response-only comparison, exposed only while the raw baseline matches.
-	BaselineContent *string `json:"baseline_content,omitempty" gorm:"-"`
-	BaselineChanged bool `json:"baseline_changed,omitempty" gorm:"-"`
-	SectionChanges []CodeWikiSectionChange `json:"section_changes,omitempty" gorm:"-"`
-	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID uint64 `json:"tenant_id" gorm:"index"`
-	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
-	RunID string `json:"run_id" gorm:"type:varchar(36);index"`
+	BaselineContent *string                 `json:"baseline_content,omitempty" gorm:"-"`
+	BaselineChanged bool                    `json:"baseline_changed,omitempty" gorm:"-"`
+	SectionChanges  []CodeWikiSectionChange `json:"section_changes,omitempty" gorm:"-"`
+	ID              string                  `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID        uint64                  `json:"tenant_id" gorm:"index"`
+	KnowledgeBaseID string                  `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
+	RunID           string                  `json:"run_id" gorm:"type:varchar(36);index"`
 	// Stable page identity: the wiki slug the page publishes under
 	PageKey string `json:"page_key" gorm:"type:varchar(255)"`
-	Title string `json:"title" gorm:"type:varchar(512)"`
+	Title   string `json:"title" gorm:"type:varchar(512)"`
 	// Existing wiki page type (index | synthesis | summary | concept | …);
 	// the code-wiki document category rides in Category, not in page_type,
 	// so existing type whitelists and filters keep working.
@@ -709,8 +715,8 @@ type CodeWikiRunPage struct {
 	Category string `json:"category" gorm:"type:varchar(32)"`
 	// Directory breadcrumb for the wiki browser (category path)
 	CategoryPath StringArray `json:"category_path" gorm:"type:json"`
-	Content string `json:"content" gorm:"type:text"`
-	Summary string `json:"summary" gorm:"type:text"`
+	Content      string      `json:"content" gorm:"type:text"`
+	Summary      string      `json:"summary" gorm:"type:text"`
 	// Evidence citations referenced by this page, as a JSON array of
 	// CodeWikiEvidenceSpec (IDs assigned before generation; validated before
 	// staging). Kept inline because run pages are immutable once staged.
@@ -731,7 +737,7 @@ type CodeWikiRunPage struct {
 	GenerationError string `json:"generation_error,omitempty"`
 	// Scope is the planned page scope (analysis focus, persisted so a paused
 	// run can resume the remaining pages without re-planning).
-	Scope string `json:"scope,omitempty" gorm:"type:varchar(1024)"`
+	Scope     string    `json:"scope,omitempty" gorm:"type:varchar(1024)"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -783,15 +789,15 @@ const (
 // publish time, bound to the published page version.
 type CodeWikiEvidenceSpec struct {
 	// ID the model cites, e.g. "E1"
-	ID string `json:"id"`
+	ID           string `json:"id"`
 	RepositoryID string `json:"repository_id"`
-	SnapshotID string `json:"snapshot_id"`
-	CommitSHA string `json:"commit_sha,omitempty"`
-	Path string `json:"path"`
-	StartLine int `json:"start_line,omitempty"`
-	EndLine int `json:"end_line,omitempty"`
-	Symbol string `json:"symbol,omitempty"`
-	Type string `json:"type,omitempty"`
+	SnapshotID   string `json:"snapshot_id"`
+	CommitSHA    string `json:"commit_sha,omitempty"`
+	Path         string `json:"path"`
+	StartLine    int    `json:"start_line,omitempty"`
+	EndLine      int    `json:"end_line,omitempty"`
+	Symbol       string `json:"symbol,omitempty"`
+	Type         string `json:"type,omitempty"`
 	// Quote is a short excerpt (bounded) used to verify the reference still
 	// resolves to the cited content at validation time.
 	Quote string `json:"quote,omitempty"`
@@ -801,8 +807,8 @@ type CodeWikiEvidenceSpec struct {
 // Historical versions keep their own rows, so reverting a page restores the
 // exact references that version was generated from.
 type CodeWikiPageEvidence struct {
-	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID uint64 `json:"tenant_id" gorm:"index"`
+	ID              string `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID        uint64 `json:"tenant_id" gorm:"index"`
 	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
 	// Published wiki page
 	PageID string `json:"page_id" gorm:"type:varchar(36);index:idx_code_wiki_evidence_page_version"`
@@ -811,16 +817,16 @@ type CodeWikiPageEvidence struct {
 	// Originating run
 	RunID string `json:"run_id" gorm:"type:varchar(36);index"`
 	// Evidence ID as cited in the content (E1, E2, …)
-	EvidenceKey string `json:"evidence_key" gorm:"type:varchar(16)"`
-	RepositoryID string `json:"repository_id" gorm:"type:varchar(36)"`
-	SnapshotID string `json:"snapshot_id" gorm:"type:varchar(36)"`
-	CommitSHA string `json:"commit_sha" gorm:"type:varchar(64)"`
-	Path string `json:"path" gorm:"type:varchar(1024)"`
-	StartLine int `json:"start_line"`
-	EndLine int `json:"end_line"`
-	Symbol string `json:"symbol,omitempty" gorm:"type:varchar(512)"`
-	Type string `json:"type,omitempty" gorm:"type:varchar(32)"`
-	CreatedAt time.Time `json:"created_at"`
+	EvidenceKey  string    `json:"evidence_key" gorm:"type:varchar(16)"`
+	RepositoryID string    `json:"repository_id" gorm:"type:varchar(36)"`
+	SnapshotID   string    `json:"snapshot_id" gorm:"type:varchar(36)"`
+	CommitSHA    string    `json:"commit_sha" gorm:"type:varchar(64)"`
+	Path         string    `json:"path" gorm:"type:varchar(1024)"`
+	StartLine    int       `json:"start_line"`
+	EndLine      int       `json:"end_line"`
+	Symbol       string    `json:"symbol,omitempty" gorm:"type:varchar(512)"`
+	Type         string    `json:"type,omitempty" gorm:"type:varchar(32)"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // TableName specifies the database table name.
@@ -846,22 +852,22 @@ type CodeWikiPageEvidenceView struct {
 type CodeWikiAnalysisProfileRequest struct {
 	ProviderKind string `json:"provider_kind" binding:"required"`
 	// MCPServiceID: the tenant MCP service to use (custom_mcp only).
-	MCPServiceID string `json:"mcp_service_id,omitempty"`
-	ToolMappings []CodeWikiToolMapping `json:"tool_mappings,omitempty"`
-	SnapshotDelivery string `json:"snapshot_delivery,omitempty"`
-	SharedRoot string `json:"shared_root,omitempty"`
+	MCPServiceID     string                `json:"mcp_service_id,omitempty"`
+	ToolMappings     []CodeWikiToolMapping `json:"tool_mappings,omitempty"`
+	SnapshotDelivery string                `json:"snapshot_delivery,omitempty"`
+	SharedRoot       string                `json:"shared_root,omitempty"`
 }
 
 // CodeWikiRepositoryUpsertRequest creates or updates a repository binding.
 type CodeWikiRepositoryUpsertRequest struct {
-	SourceID string `json:"source_id" binding:"required"`
-	ProjectID string `json:"project_id" binding:"required"`
-	DisplayName string `json:"display_name,omitempty"`
-	Role string `json:"role,omitempty"`
-	Ref string `json:"ref,omitempty"`
-	IncludePaths []string `json:"include_paths,omitempty"`
+	SourceID        string   `json:"source_id" binding:"required"`
+	ProjectID       string   `json:"project_id" binding:"required"`
+	DisplayName     string   `json:"display_name,omitempty"`
+	Role            string   `json:"role,omitempty"`
+	Ref             string   `json:"ref,omitempty"`
+	IncludePaths    []string `json:"include_paths,omitempty"`
 	ExcludePatterns []string `json:"exclude_patterns,omitempty"`
-	Enabled *bool `json:"enabled,omitempty"`
+	Enabled         *bool    `json:"enabled,omitempty"`
 }
 
 // CodeWikiSyncRequest triggers repository sync. Empty repository_ids syncs
@@ -894,37 +900,37 @@ const (
 
 // Errors surfaced by the code wiki service layer.
 var (
-	ErrCodeWikiNotCodeWikiKB     = errors.New("knowledge base is not a code wiki knowledge base")
-	ErrCodeWikiRepoNotFound      = errors.New("code wiki repository binding not found")
-	ErrCodeWikiSnapshotNotFound  = errors.New("code wiki snapshot not found")
-	ErrCodeWikiArtifactNotFound  = errors.New("code wiki analysis artifact not found")
-	ErrCodeWikiProfileNotFound   = errors.New("code wiki analysis profile not found")
-	ErrCodeWikiRunNotFound       = errors.New("code wiki run not found")
-	ErrCodeWikiRunNotStaged      = errors.New("code wiki run is not staged")
-	ErrCodeWikiRunActiveExists   = errors.New("another generation run is already active for this knowledge base")
-	ErrCodeWikiNoRepositories    = errors.New("no enabled repositories with ready analysis artifacts")
-	ErrCodeWikiSourceMismatch    = errors.New("data source does not belong to this knowledge base")
-	ErrCodeWikiPublishConflict   = errors.New("publish conflict: live pages were edited after generation")
-	ErrCodeWikiEvidenceNotFound  = errors.New("code wiki evidence not found")
-	ErrCodeWikiProfileInvalid    = errors.New("code wiki analysis profile is invalid")
+	ErrCodeWikiNotCodeWikiKB       = errors.New("knowledge base is not a code wiki knowledge base")
+	ErrCodeWikiRepoNotFound        = errors.New("code wiki repository binding not found")
+	ErrCodeWikiSnapshotNotFound    = errors.New("code wiki snapshot not found")
+	ErrCodeWikiArtifactNotFound    = errors.New("code wiki analysis artifact not found")
+	ErrCodeWikiProfileNotFound     = errors.New("code wiki analysis profile not found")
+	ErrCodeWikiRunNotFound         = errors.New("code wiki run not found")
+	ErrCodeWikiRunNotStaged        = errors.New("code wiki run is not staged")
+	ErrCodeWikiRunActiveExists     = errors.New("another generation run is already active for this knowledge base")
+	ErrCodeWikiNoRepositories      = errors.New("no enabled repositories with ready analysis artifacts")
+	ErrCodeWikiSourceMismatch      = errors.New("data source does not belong to this knowledge base")
+	ErrCodeWikiPublishConflict     = errors.New("publish conflict: live pages were edited after generation")
+	ErrCodeWikiEvidenceNotFound    = errors.New("code wiki evidence not found")
+	ErrCodeWikiProfileInvalid      = errors.New("code wiki analysis profile is invalid")
 	ErrCodeWikiCapabilitiesMissing = errors.New("analysis provider does not meet minimum capabilities; run the capability test for details")
 )
 
 // CodeWikiRepositoryFilter is the query shape for listing bindings.
 type CodeWikiRepositoryFilter struct {
 	KnowledgeBaseID string
-	SourceID string
-	Enabled *bool
+	SourceID        string
+	Enabled         *bool
 }
 
 // CodeWikiCodeSnippet is a bounded source excerpt read from a snapshot,
 // used for evidence validation and local source viewing.
 type CodeWikiCodeSnippet struct {
-	Path string `json:"path"`
-	StartLine int `json:"start_line"`
-	EndLine int `json:"end_line"`
-	Content string `json:"content"`
-	Truncated bool `json:"truncated,omitempty"`
+	Path      string `json:"path"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+	Content   string `json:"content"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // CodeWikiMaxSnippetLines bounds evidence excerpt reads.

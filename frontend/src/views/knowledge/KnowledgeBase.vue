@@ -2392,7 +2392,7 @@ async function createNewSession(value: string): Promise<void> {
 
       <!-- Keep task observation mounted across all three code-wiki tabs. -->
       <div v-if="isCodeWiki && kbId" :class="{ 'wiki-main-area wiki-main-area--codewiki': activeKbTab === 'codewiki' }">
-        <CodeWikiPanel :key="kbId" :knowledge-base-id="kbId" :can-edit="canEdit" :show-sources="activeKbTab === 'codewiki'"
+        <CodeWikiPanel :key="`${kbId}:${kbInfo?.code_wiki_config?.mode || 'project'}`" :knowledge-base-id="kbId" :mode="kbInfo?.code_wiki_config?.mode || 'project'" :can-edit="canEdit" :show-sources="activeKbTab === 'codewiki'"
           @open-kb-settings="handleOpenKBSettings" @published="codeWikiPublishedRevision++" @open-wiki-page="onOpenCodeWikiPage" />
       </div>
 
