@@ -365,6 +365,17 @@ func buildPublishedWikiPage(
 	live.PageMetadata = types.JSON(metadataJSON)
 	live.LastEditSource = types.WikiEditSourcePipeline
 	live.UpdatedAt = now
+	var cfg codeWikiRunConfig
+	if err := json.Unmarshal(run.ConfigSnapshot, &cfg); err != nil && len(run.ConfigSnapshot) > 0 {
+		return nil, nil, err
+	}
+	if cfg.PublicationGuard != nil && cfg.PublicationGuard.ArchivePages[candidate.PageKey] != "" {
+		live.Status = types.WikiPageStatusArchived
+		// Preserve the last published document exactly for history. Archived
+		// outgoing links are not part of the current knowledge graph.
+		live.Content, live.Summary = revision.Content, revision.Summary
+		live.OutLinks = nil
+	}
 	return live, revision, nil
 }
 

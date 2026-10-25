@@ -15,6 +15,9 @@ import (
 // Resolve a proposal against actual source topics, not a model-supplied copy of
 // their conclusions. The repository fences every referenced revision again.
 func (s *codeWikiService) applyTopicPlanChange(ctx context.Context, state *codeWikiRunState, current *types.CodeWikiTopic, cp *types.CodeWikiTopicCheckpoint) error {
+	if guard := state.cfg.PublicationGuard; guard != nil && guard.TopicUpdates {
+		return fmt.Errorf("增量更新的主题身份和影响范围已冻结；请保留目录调整为待查问题，不能在执行中修改未审批范围")
+	}
 	request := cp.PlanChange
 	if request == nil {
 		return fmt.Errorf("缺少主题调整请求")

@@ -15,6 +15,10 @@ func (s *codeWikiService) readRunControl(ctx context.Context, identity *types.Co
 	if err != nil || current == nil {
 		return fmt.Errorf("%w: 无法确认任务控制状态，已中断当前执行", errCodeWikiRunPaused)
 	}
+	if identity.WriteLeaseOwner != "" && (current.LeaseOwner != identity.WriteLeaseOwner ||
+		current.LeaseExpiresAt == nil || !current.LeaseExpiresAt.After(time.Now())) {
+		return types.ErrCodeWikiRunLeaseLost
+	}
 	switch {
 	case current.TenantID != identity.TenantID || (checkEpoch && current.ExecutionEpoch != identity.ExecutionEpoch),
 		current.CancelRequested, types.IsTerminalCodeWikiRunStatus(current.Status):
@@ -50,7 +54,7 @@ func (s *codeWikiService) watchRunControl(ctx context.Context, run *types.CodeWi
 	// executeRun mutates run as it progresses (including beginning a new topic
 	// epoch). Only capture immutable identity; never read its mutable snapshot
 	// from the watcher goroutine. Topic workers additionally fence their epoch.
-	identity := types.CodeWikiRun{TenantID: run.TenantID, KnowledgeBaseID: run.KnowledgeBaseID, ID: run.ID, ExecutionEpoch: run.ExecutionEpoch}
+	identity := types.CodeWikiRun{TenantID: run.TenantID, KnowledgeBaseID: run.KnowledgeBaseID, ID: run.ID, ExecutionEpoch: run.ExecutionEpoch, WriteLeaseOwner: run.WriteLeaseOwner}
 	workCtx, cancel := context.WithCancelCause(ctx)
 	done := make(chan struct{})
 	go func() {

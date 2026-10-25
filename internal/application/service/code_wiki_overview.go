@@ -46,6 +46,9 @@ func (s *codeWikiService) buildTopicOverview(ctx context.Context, state *codeWik
 		if topic.TopicKey == types.CodeWikiSummaryTopicKey || topic.Status == "superseded" {
 			continue
 		}
+		if guard := state.cfg.PublicationGuard; guard != nil && guard.ArchivePages[topic.TopicKey] != "" {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}

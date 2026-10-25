@@ -203,12 +203,14 @@ export interface CodeWikiRunDetail {
 }
 
 export interface CodeWikiImpactPlan {
+  topic_updates?: boolean;
+  archive_pages?: Record<string, string>;
   plan_token: string;
   review_required?: boolean;
   review_approved?: boolean;
   new_pages?: Record<string, string>;
   sections?: Record<string, Array<{ id: string; title: string; hash: string }>>;
-  impact?: Record<string, { kind: 'joint_review' | 'citation_changed' | 'scope_changed' | 'new_source'; changed_sources?: string[]; section_ids?: string[] }>;
+  impact?: Record<string, { kind: 'joint_review' | 'citation_changed' | 'scope_changed' | 'new_source' | 'unaffected' | 'dependency_changed' | 'cross_repository_review' | 'dependency_gap_review' | 'source_deleted' | 'link_cleanup'; changed_sources?: string[]; section_ids?: string[] }>;
 }
 
 export function approveCodeWikiImpact(kbId: string, runId: string, plan_token: string, sections: Record<string, string[]>) {
@@ -426,6 +428,10 @@ export function getCodeWikiRun(kbId: string, runId: string) {
 
 export function cancelCodeWikiRun(kbId: string, runId: string) {
   return post(`/api/v1/knowledgebase/${kbId}/code-wiki/runs/${runId}/cancel`);
+}
+
+export function deleteCodeWikiRun(kbId: string, runId: string) {
+  return del(`/api/v1/knowledgebase/${kbId}/code-wiki/runs/${runId}`);
 }
 
 // 暂停：worker 在页面间隔观察到标志后进入 paused（计划与已完成页保留）。

@@ -10,6 +10,8 @@ import (
 // row, never the reader's normalized markdown. The transaction checks the
 // complete baseline and rejects writes outside its explicit page whitelist.
 type CodeWikiPublicationGuard struct {
+	TopicUpdates    bool                          `json:"topic_updates,omitempty"`
+	ArchivePages    map[string]string             `json:"archive_pages,omitempty"`
 	PlanToken       string                        `json:"plan_token,omitempty"`
 	ReviewRequired  bool                          `json:"review_required,omitempty"`
 	ReviewApproved  bool                          `json:"review_approved,omitempty"`

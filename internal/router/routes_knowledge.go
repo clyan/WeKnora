@@ -290,6 +290,7 @@ func RegisterCodeWikiRoutes(r *gin.RouterGroup, codeWikiHandler *handler.CodeWik
 		cw.GET("/runs", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListRuns)
 		cw.POST("/runs", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.CreateRun)
 		cw.GET("/runs/:id", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.GetRun)
+		cw.DELETE("/runs/:id", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), codeWikiHandler.DeleteRun)
 		cw.GET("/runs/:id/events", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListRunEvents)
 		cw.GET("/runs/:id/topics", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.ListRunTopics)
 		cw.GET("/runs/:id/topics/:topic_key", g.Viewer(), g.KBAccessRead("kb_id"), codeWikiHandler.GetRunTopic)

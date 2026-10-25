@@ -356,7 +356,7 @@
         </details>
         <section v-if="impactPlan?.review_required" class="candidate-detail">
           <h4>{{ $t('codeWiki.workspace.impactReviewTitle') }}</h4>
-          <p class="cw-section-desc">{{ $t('codeWiki.workspace.impactReviewHint') }}</p>
+          <p class="cw-section-desc">{{ $t(impactPlan.topic_updates ? 'codeWiki.workspace.topicImpactReviewHint' : 'codeWiki.workspace.impactReviewHint') }}</p>
           <fieldset v-for="page in runPages" :key="page.page_key" class="impact-page">
             <legend>{{ page.title }}</legend>
             <p v-if="impactPlan.impact?.[page.page_key]" class="cw-section-desc">
@@ -386,7 +386,10 @@
           <div class="run-page-item">
             <button type="button" class="run-page-name page-link" aria-haspopup="dialog"
               @click="openDocumentPreview(p.page_key)">{{ p.title || p.page_key }}</button>
-            <t-tag v-if="p.generation_error" size="small" variant="light" theme="danger">
+            <t-tag v-if="impactPlan?.archive_pages?.[p.page_key]" size="small" variant="light" theme="warning">
+              {{ $t(displayedRun?.status === 'published' || displayedRun?.status === 'superseded' ? 'codeWiki.workspace.topicArchived' : 'codeWiki.workspace.topicArchiveCandidate') }}
+            </t-tag>
+            <t-tag v-else-if="p.generation_error" size="small" variant="light" theme="danger">
               {{ $t('codeWiki.runs.pageFailed') }}
             </t-tag>
             <t-tag v-else-if="p.status === 'pending' && ['retrieving', 'generating', 'validating'].includes(p.validation_status)"
@@ -423,6 +426,13 @@
             theme="primary" :disabled="!!activeRun || !canEdit || actionPending" @click="retryRun(row)">
             {{ $t('codeWiki.runs.retry') }}
           </t-button>
+          <t-popconfirm v-if="row.status === 'canceled' && canEdit"
+            :content="$t('codeWiki.runs.deleteConfirm')" theme="danger"
+            @confirm="removeRun(row)">
+            <t-button variant="text" size="small" theme="danger" :disabled="actionPending">
+              {{ $t('common.delete') }}
+            </t-button>
+          </t-popconfirm>
         </template>
       </t-table>
     </section>
@@ -455,7 +465,7 @@ import { useI18n } from 'vue-i18n'
 import { MessagePlugin } from 'tdesign-vue-next'
 import {
   listCodeWikiRepositories, syncCodeWikiRepositories, deleteCodeWikiRepository,
-  listCodeWikiRuns, createCodeWikiRun, cancelCodeWikiRun, pauseCodeWikiRun,
+  listCodeWikiRuns, createCodeWikiRun, cancelCodeWikiRun, deleteCodeWikiRun, pauseCodeWikiRun,
   resumeCodeWikiRun, retryCodeWikiRun, publishCodeWikiRun, getCodeWikiRun,
   getCodeWikiAnalysisProfile, testCodeWikiAnalysisProfile,
   listCodeWikiRunEvents,
@@ -962,6 +972,29 @@ const cancelActiveRun = () => performRunAction(cancelCodeWikiRun, 'codeWiki.runs
 const pauseActiveRun = () => performRunAction(pauseCodeWikiRun, 'codeWiki.runs.pauseRequested')
 const resumeActiveRun = () => performRunAction(resumeCodeWikiRun, 'codeWiki.runs.resumed')
 
+const removeRun = async (row: CodeWikiRun) => {
+  if (!props.canEdit || row.status !== 'canceled' || actionPending.value) return
+  const kbId = props.knowledgeBaseId
+  actionPending.value = true
+  try {
+    await deleteCodeWikiRun(kbId, row.id)
+    if (kbId !== props.knowledgeBaseId) return
+    ++runsSeq // Discard an older poll that may still contain the removed run.
+    runs.value = runs.value.filter(run => run.id !== row.id)
+    if (selectedRunId.value === row.id) {
+      selectedRunId.value = ''
+      documentPreviewVisible.value = false
+    }
+    MessagePlugin.success(t('common.deleted'))
+    await loadRuns()
+    await loadRunDetail()
+  } catch (err: any) {
+    MessagePlugin.error(err?.message ?? t('codeWiki.loadFailed'))
+  } finally {
+    actionPending.value = false
+  }
+}
+
 const retryRun = async (row: CodeWikiRun) => {
   if (actionPending.value) return
   actionPending.value = true
@@ -1020,7 +1053,7 @@ const runColumns = computed(() => [
   { colKey: 'completed_pages', title: t('codeWiki.runs.columnPages'), width: 90,
     cell: (_h: any, { row }: any) => `${row.completed_pages}/${row.total_pages}` },
   { colKey: 'model_calls', title: t('codeWiki.runs.columnModelCalls'), width: 100 },
-  { colKey: 'run-actions', title: t('common.actions'), width: 180 },
+  { colKey: 'run-actions', title: t('common.actions'), width: 230 },
 ])
 
 const runStatusLabel = (status: string) => t(`codeWiki.runStatus.${status}`)

@@ -7,6 +7,24 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
+// Execution policy and checkpoints must not turn the second increment into a
+// full rebuild. Source/configuration changes are compared separately.
+func codeWikiGenerationSettings(cfg codeWikiRunConfig) codeWikiRunConfig {
+	cfg.PublicationGuard, cfg.SourceChanges, cfg.SnapshotReferences = nil, nil, nil
+	cfg.FrontendPlanning, cfg.FrontendPlanReady = nil, false
+	cfg.TopicConcurrency, cfg.MaxModelCalls, cfg.TimeoutMinutes = 0, 0, 0
+	cfg.FullSourceReanalysis = false
+	return cfg
+}
+
+func compatibleCodeWikiIncrementalInputs(published *types.CodeWikiRun, modelID string, profileVersion int, before, after codeWikiRunConfig) bool {
+	return published != nil && published.Status == types.CodeWikiRunStatusPublished &&
+		published.ModelID == modelID && published.ProfileVersion == profileVersion &&
+		before.TopicVersion == 1 && after.TopicVersion == 1 &&
+		before.DirectoryVersion == types.CodeWikiDirectoryVersionFrontend &&
+		reflect.DeepEqual(codeWikiGenerationSettings(before), codeWikiGenerationSettings(after))
+}
+
 // sameCodeWikiGenerationInputs is deliberately strict. Unknown, excluded,
 // duplicate or incomplete inputs cannot justify a no-change conclusion.
 // Branch names are tracking settings; snapshot identity pins the actual code
@@ -32,14 +50,7 @@ func sameCodeWikiGenerationInputs(published *types.CodeWikiRun, modelID string, 
 			return false
 		}
 	}
-	previous.PublicationGuard, cfg.PublicationGuard = nil, nil
-	previous.SourceChanges, cfg.SourceChanges = nil, nil
-	previous.SnapshotReferences, cfg.SnapshotReferences = nil, nil
-	// Execution checkpoints do not change generation inputs.
-	previous.FrontendPlanning, cfg.FrontendPlanning = nil, nil
-	previous.FrontendPlanReady, cfg.FrontendPlanReady = false, false
-	previous.TopicConcurrency, cfg.TopicConcurrency = 0, 0
-	if !reflect.DeepEqual(previous, cfg) {
+	if !reflect.DeepEqual(codeWikiGenerationSettings(previous), codeWikiGenerationSettings(cfg)) {
 		return false
 	}
 	type input struct {

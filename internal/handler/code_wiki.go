@@ -308,7 +308,7 @@ func (h *CodeWikiHandler) GetRun(c *gin.Context) {
 	}
 	var heartbeatAt *time.Time
 	if run.LeaseExpiresAt != nil {
-		at := run.LeaseExpiresAt.Add(-time.Duration(types.CodeWikiRunLeaseTTLSeconds) * time.Second)
+		at := types.CodeWikiRunHeartbeatAt(*run.LeaseExpiresAt, time.Now())
 		heartbeatAt = &at
 	}
 	if service, ok := h.service.(interfaces.CodeWikiTopicService); ok && run.ExecutionEpoch > 0 {
@@ -511,6 +511,19 @@ func (h *CodeWikiHandler) ListSourcePages(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": pages})
 }
 
+// DeleteRun handles DELETE /knowledgebase/:kb_id/code-wiki/runs/:id.
+func (h *CodeWikiHandler) DeleteRun(c *gin.Context) {
+	kbID, ok := h.resolveCodeWikiKB(c)
+	if !ok {
+		return
+	}
+	if err := h.service.DeleteRun(c.Request.Context(), kbID, c.Param("id")); err != nil {
+		respondCodeWikiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
 // CancelRun handles POST /knowledgebase/:kb_id/code-wiki/runs/:id/cancel.
 func (h *CodeWikiHandler) CancelRun(c *gin.Context) {
 	kbID, ok := h.resolveCodeWikiKB(c)
@@ -639,7 +652,7 @@ func respondCodeWikiError(c *gin.Context, err error) {
 		status = http.StatusNotFound
 	case types.ErrCodeWikiTopicChanged, types.ErrCodeWikiProgressChanged:
 		status = http.StatusConflict
-	case types.ErrCodeWikiNotCodeWikiKB, types.ErrCodeWikiRunNotStaged,
+	case types.ErrCodeWikiNotCodeWikiKB, types.ErrCodeWikiRunNotStaged, types.ErrCodeWikiRunNotCanceled,
 		types.ErrCodeWikiRunActiveExists, types.ErrCodeWikiNoRepositories,
 		types.ErrCodeWikiSourceMismatch, types.ErrCodeWikiProfileInvalid,
 		types.ErrCodeWikiCapabilitiesMissing, types.ErrCodeWikiPublishConflict:

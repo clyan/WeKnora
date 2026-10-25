@@ -262,11 +262,81 @@ func (s *codeWikiService) startCodeWikiTopics(ctx context.Context, state *codeWi
 		byKey[p.PageKey] = p
 	}
 	var topics []*types.CodeWikiTopic
+	baselineTopics := map[string]*types.CodeWikiTopic{}
+	if guard := state.cfg.PublicationGuard; guard != nil && guard.TopicUpdates {
+		rows, err := repo.ListTopics(ctx, state.run.TenantID, state.run.KnowledgeBaseID, guard.BaselineRunID)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			baselineTopics[row.TopicKey] = row
+		}
+	}
 	for _, page := range state.pages {
 		cp := newTopicCheckpoint(page)
+		preserved := false
+		systemAction := ""
+		guard := state.cfg.PublicationGuard
+		if guard != nil && guard.TopicUpdates && guard.ReviewApproved {
+			if guard.ArchivePages[page.Slug] != "" {
+				live, err := s.rawCodeWikiBaseline(ctx, state, page.Slug)
+				if err != nil {
+					return err
+				}
+				if err := s.stageRunPage(ctx, state.run, page, live.Content, nil, ""); err != nil {
+					return err
+				}
+				cp = types.CodeWikiTopicCheckpoint{Version: 1}
+				systemAction = "源码已全部删除，已生成归档候选；发布前保留现有文档"
+			} else if page.Slug == types.CodeWikiSummaryTopicKey && len(guard.ArchivePages) > 0 && len(guard.ArchivePages) == len(state.pages)-1 {
+				content := "# " + page.Title + "\n\n本轮源码差异确认原有主题的所属源码已全部删除，相关主题已列入归档候选。发布后可通过历史版本追溯；当前没有可阅读的源码专题。\n"
+				if err := s.stageRunPage(ctx, state.run, page, content, nil, ""); err != nil {
+					return err
+				}
+				cp = types.CodeWikiTopicCheckpoint{Version: 1}
+				systemAction = "已按源码删除清单更新阅读导引，等待发布"
+			}
+		}
+		if guard != nil && guard.TopicUpdates && guard.ReviewApproved && (guard.Impact[page.Slug].Kind == "unaffected" || guard.Impact[page.Slug].Kind == "link_cleanup") {
+			prior := baselineTopics[page.Slug]
+			if prior == nil || prior.Status != "completed" || json.Unmarshal(prior.Checkpoint, &cp) != nil || cp.Version != 1 {
+				return fmt.Errorf("未变主题缺少可复用的已发布分析记录：%s", page.Title)
+			}
+			// Every referenced source file is unchanged (checked by impact), so
+			// its exact line ranges also hold in the target immutable snapshot.
+			for i := range cp.Evidence {
+				scope, ok := state.scopes[cp.Evidence[i].RepositoryID]
+				if !ok {
+					return fmt.Errorf("未变主题的来源仓库不可用")
+				}
+				cp.Evidence[i].SnapshotID, cp.Evidence[i].CommitSHA = scope.SnapshotID, scope.CommitSHA
+			}
+			if guard.Impact[page.Slug].Kind == "link_cleanup" {
+				live, err := s.rawCodeWikiBaseline(ctx, state, page.Slug)
+				if err != nil {
+					return err
+				}
+				for i := range cp.Sections {
+					cp.Sections[i].Content = removeArchivedCodeWikiLinks(cp.Sections[i].Content, guard.ArchivePages)
+				}
+				for i := range cp.Items {
+					cp.Items[i].Conclusion = removeArchivedCodeWikiLinks(cp.Items[i].Conclusion, guard.ArchivePages)
+					cp.Items[i].Condition = removeArchivedCodeWikiLinks(cp.Items[i].Condition, guard.ArchivePages)
+				}
+				if err := s.stageRunPage(ctx, state.run, page, removeArchivedCodeWikiLinks(live.Content, guard.ArchivePages), cp.Evidence, ""); err != nil {
+					return err
+				}
+				systemAction = "仅移除已归档主题的链接，其他内容原样保留"
+			} else if p := byKey[page.Slug]; p != nil && p.Status == types.CodeWikiRunPageStatusPending {
+				if err := s.preserveCodeWikiPage(ctx, state, page); err != nil {
+					return err
+				}
+			}
+			preserved = true
+		}
 		// Carry verified read locations from discovery; source is fetched only
 		// when needed, rather than copying the planner's conversation.
-		if planning := state.cfg.FrontendPlanning; planning != nil {
+		if planning := state.cfg.FrontendPlanning; planning != nil && systemAction == "" {
 			if progress := planning.Repositories[page.RepositoryID]; progress != nil {
 				for _, span := range progress.ReadSpans {
 					for _, path := range page.SourcePaths {
@@ -280,10 +350,22 @@ func (s *codeWikiService) startCodeWikiTopics(ctx context.Context, state *codeWi
 		}
 		blob, _ := json.Marshal(cp)
 		status := "queued"
+		if preserved || systemAction != "" {
+			status = "completed"
+		}
 		if p := byKey[page.Slug]; p != nil && p.Status != types.CodeWikiRunPageStatusPending {
 			status = "completed"
 		}
-		topics = append(topics, &types.CodeWikiTopic{TenantID: state.run.TenantID, KnowledgeBaseID: state.run.KnowledgeBaseID, RunID: state.run.ID, TopicKey: page.Slug, Title: page.Title, Status: status, Action: "等待分析源码", Checkpoint: types.JSON(blob)})
+		action := "等待分析源码"
+		revision := 0
+		if preserved {
+			action = "源码与依赖未受影响，文档原样保留"
+			revision = baselineTopics[page.Slug].Revision
+		}
+		if systemAction != "" {
+			action = systemAction
+		}
+		topics = append(topics, &types.CodeWikiTopic{TenantID: state.run.TenantID, KnowledgeBaseID: state.run.KnowledgeBaseID, RunID: state.run.ID, TopicKey: page.Slug, Title: page.Title, Status: status, Revision: revision, Action: action, Checkpoint: types.JSON(blob)})
 	}
 	if err := repo.EnsureTopics(ctx, state.run, topics); err != nil {
 		return err
@@ -539,6 +621,9 @@ func (s *codeWikiService) processCodeWikiTopic(ctx context.Context, payload type
 			topic.Checkpoint = types.JSON(blob)
 			evidenceJSON, _ := json.Marshal(evidence)
 			candidate := &types.CodeWikiRunPage{TenantID: run.TenantID, KnowledgeBaseID: run.KnowledgeBaseID, RunID: run.ID, PageKey: page.Slug, Content: content, Evidence: types.JSON(evidenceJSON), Status: types.CodeWikiRunPageStatusStaged, ValidationStatus: "passed"}
+			if guard := state.cfg.PublicationGuard; guard != nil {
+				candidate.Content = removeArchivedCodeWikiLinks(candidate.Content, guard.ArchivePages)
+			}
 			if err := repo.StageTopic(outcomeCtx, topic, run.ExecutionEpoch, topic.Revision, candidate); err != nil {
 				if errors.Is(err, types.ErrCodeWikiTopicNeedsRecheck) {
 					completed, planApplied = false, true

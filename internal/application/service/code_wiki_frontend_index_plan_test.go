@@ -193,7 +193,7 @@ func TestFrontendIndexedPlanningRejectsOldCheckpointAndUnsupportedProvider(t *te
 
 func TestFrontendDocumentTemplatesReachTopicModel(t *testing.T) {
 	for _, tc := range []struct{ category, section, question string }{
-		{"frontend_api", "真实入参（按调用点）", "对象展开覆盖顺序"},
+		{"frontend_api", "真实入参（各调用点反推）", "对象展开覆盖顺序"},
 		{"frontend_workflow", "分支、失败与取消", "异步或并行步骤"},
 	} {
 		t.Run(tc.category, func(t *testing.T) {

@@ -76,22 +76,24 @@ type codeWikiFrozenProvider struct {
 }
 
 type codeWikiPlannedPage struct {
-	IndexHints      []codebase.PlanningHint `json:"index_hints,omitempty"`
-	SourceSpans     []codeWikiSourceSpan    `json:"source_spans,omitempty"`
-	Summary         string                  `json:"-"`
-	SortOrder       int                     `json:"-"`
-	RepositoryID    string                  `json:"repository_id,omitempty"`
-	InstanceKind    string                  `json:"instance_kind,omitempty"`
-	Domain          string                  `json:"domain,omitempty"`
-	SourcePaths     []string                `json:"source_paths,omitempty"`
-	PageType        string                  `json:"-"`
-	BaselineVersion int                     `json:"-"`
-	BaselineSource  string                  `json:"-"`
-	CategoryPath    types.StringArray       `json:"-"`
-	Slug            string                  `json:"slug"`
-	Title           string                  `json:"title"`
-	Category        string                  `json:"category"`
-	Scope           string                  `json:"scope"`
+	DependencyPaths   []string                `json:"dependency_paths,omitempty"`
+	DependencyVersion int                     `json:"dependency_version,omitempty"`
+	IndexHints        []codebase.PlanningHint `json:"index_hints,omitempty"`
+	SourceSpans       []codeWikiSourceSpan    `json:"source_spans,omitempty"`
+	Summary           string                  `json:"-"`
+	SortOrder         int                     `json:"-"`
+	RepositoryID      string                  `json:"repository_id,omitempty"`
+	InstanceKind      string                  `json:"instance_kind,omitempty"`
+	Domain            string                  `json:"domain,omitempty"`
+	SourcePaths       []string                `json:"source_paths,omitempty"`
+	PageType          string                  `json:"-"`
+	BaselineVersion   int                     `json:"-"`
+	BaselineSource    string                  `json:"-"`
+	CategoryPath      types.StringArray       `json:"-"`
+	Slug              string                  `json:"slug"`
+	Title             string                  `json:"title"`
+	Category          string                  `json:"category"`
+	Scope             string                  `json:"scope"`
 }
 
 const (
@@ -230,7 +232,7 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 		SourcePolicyVersion:    types.CodeWikiSourcePolicyVersion,
 		FactSchemaVersion:      types.CodeWikiFactSchemaVersion,
 		SourceAnalyzerVersion:  types.CodeWikiSourceAnalyzerVersion,
-		FullSourceReanalysis:   true, // Relation-driven impact analysis is not available yet.
+		FullSourceReanalysis:   true, // Switched only for a compatible published baseline below.
 		FrontendPlannerVersion: frontendIndexPlannerVersion,
 		SnapshotReferences:     references,
 		DirectoryVersion:       types.CodeWikiDirectoryVersionFrontend,
@@ -309,6 +311,9 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 			if err != nil {
 				return nil, fmt.Errorf("cannot verify joint snapshot diff: %w", err)
 			}
+			if compatibleCodeWikiIncrementalInputs(published, synthesisModelID, profile.ConfigVersion, prior, frozen) {
+				frozen.FullSourceReanalysis = false
+			}
 		}
 	}
 	rawPages, err := s.repo.ListRawWikiPages(ctx, kbID)
@@ -320,6 +325,7 @@ func (s *codeWikiService) CreateRun(ctx context.Context, kbID string, req *types
 		frozen.PublicationGuard.BaselineRunID = published.ID
 		frozen.PublicationGuard.PlanToken = uuid.NewString()
 		frozen.PublicationGuard.ReviewRequired = !frozen.FullSourceReanalysis
+		frozen.PublicationGuard.TopicUpdates = !frozen.FullSourceReanalysis && frozen.TopicVersion == 1
 		frozen.PublicationGuard.Sections = make(map[string][]types.CodeWikiSection)
 	}
 	for _, page := range rawPages {
@@ -435,6 +441,20 @@ func (s *codeWikiService) ListRuns(ctx context.Context, kbID string) ([]*types.C
 		markCodeWikiSourceCompatibility(run)
 	}
 	return runs, err
+}
+
+// DeleteRun removes a canceled run without altering published pages or snapshots.
+func (s *codeWikiService) DeleteRun(ctx context.Context, kbID, runID string) error {
+	kb, err := s.requireCodeWikiKB(ctx, kbID)
+	if err != nil {
+		return err
+	}
+	if err := s.repo.DeleteCanceledRun(ctx, kbID, runID); err != nil {
+		return err
+	}
+	recordKBActivity(ctx, s.audit, kb.TenantID, kbID, types.AuditActionKBUpdated,
+		"code_wiki_run", runID, types.AuditOutcomeSuccess, map[string]any{"deleted": true})
+	return nil
 }
 
 // CancelRun flags cancellation; active workers interrupt their request contexts
@@ -635,7 +655,12 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 		logger.Infof(ctx, "code wiki generate: run %s already %s, dropping", run.ID, run.Status)
 		return nil
 	}
-	owner := fmt.Sprintf("%s-%d", hostnameCodeWiki(), os.Getpid())
+	if run.Status == types.CodeWikiRunStatusPaused && run.PauseRequested {
+		// A recovered or explicitly paused task waits for ResumeRun to clear
+		// the flag. Queue redelivery is not permission to resume generation.
+		return nil
+	}
+	owner := codeWikiWorkerPrefix() + uuid.NewString()
 	acquired, err := s.repo.TryAcquireRunLease(ctx, run.ID, owner, types.CodeWikiRunLeaseTTLSeconds)
 	if err != nil {
 		return err
@@ -649,6 +674,7 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 	if refreshed, rErr := s.repo.GetRunByID(ctx, run.ID); rErr == nil {
 		run = refreshed
 	}
+	run.WriteLeaseOwner = owner
 
 	// Crash/cancel safety: never leave a run stuck in a working state.
 	dispatched := false
@@ -676,6 +702,10 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 		outcomeCtx, cancelOutcome := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelOutcome()
 		switch {
+		case errors.Is(err, types.ErrCodeWikiRunLeaseLost):
+			// Recovery or a new claim owns the persisted state. Never overwrite it.
+			dispatched = true
+			return nil
 		case errors.Is(err, errCodeWikiRunCanceled):
 			// User cancellation interrupts an active stage/model request.
 			now := time.Now().UTC()
@@ -687,7 +717,7 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 			s.recordRunEvent(outcomeCtx, run, "canceled", run.Phase, nil)
 			logger.Infof(ctx, "code wiki generate: run %s canceled by user", run.ID)
 			return nil
-		case errors.Is(err, errCodeWikiRunPaused), errors.Is(err, context.DeadlineExceeded):
+		case errors.Is(err, errCodeWikiRunPaused), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 			// User pause observed between pages: the plan and completed pages
 			// persist; resume re-leases the run and continues.
 			run.Status = types.CodeWikiRunStatusPaused
@@ -702,6 +732,8 @@ func (s *codeWikiService) ProcessCodeWikiGenerate(ctx context.Context, task *asy
 				}
 			} else if errors.Is(err, context.DeadlineExceeded) {
 				run.Phase = "执行时间已到，进度已保存，可继续"
+			} else if errors.Is(err, context.Canceled) {
+				run.Phase = "执行已中断，进度已保存，点击继续生成"
 			} else if errors.Is(err, errTopicContext) {
 				run.Phase = errTopicContext.Error()
 			} else if errors.Is(err, errCodeWikiFrontendPlanningStalled) {
@@ -746,9 +778,16 @@ func (s *codeWikiService) finalizeRunOnError(ctx context.Context, run *types.Cod
 		refreshed.Status == types.CodeWikiRunStatusStaged || refreshed.Status == types.CodeWikiRunStatusPaused {
 		return
 	}
+	if run.WriteLeaseOwner != "" {
+		if refreshed.LeaseOwner != run.WriteLeaseOwner {
+			return
+		}
+		refreshed.WriteLeaseOwner = run.WriteLeaseOwner
+	}
 	if ctx.Err() != nil {
-		refreshed.Status = types.CodeWikiRunStatusFailed
-		refreshed.ErrorMessage = "worker stopped before completion; retry to resume from prepared data"
+		refreshed.Status = types.CodeWikiRunStatusPaused
+		refreshed.Phase = "执行已中断，进度已保存，点击继续生成"
+		refreshed.ErrorMessage = ""
 	} else {
 		refreshed.Status = types.CodeWikiRunStatusFailed
 		refreshed.ErrorMessage = "generation stopped unexpectedly; retry to resume from prepared data"
@@ -809,6 +848,10 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		refreshed, err := s.repo.GetRunByID(ctx, run.ID)
 		if err != nil {
 			return fmt.Errorf("cannot verify run controls: %w", err)
+		}
+		if run.WriteLeaseOwner != "" && (refreshed.LeaseOwner != run.WriteLeaseOwner ||
+			refreshed.LeaseExpiresAt == nil || !refreshed.LeaseExpiresAt.After(time.Now())) {
+			return types.ErrCodeWikiRunLeaseLost
 		}
 		if refreshed.CancelRequested {
 			return errCodeWikiRunCanceled
@@ -933,7 +976,7 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 		if err != nil {
 			return err
 		}
-		if len(pages) > 0 && state.cfg.TopicVersion == 1 {
+		if len(pages) > 0 && state.cfg.TopicVersion == 1 && !hasCodeWikiSummary(pages) {
 			pages = append(pages, codeWikiPlannedPage{Slug: types.CodeWikiSummaryTopicKey, Title: "项目概览与阅读导引", Category: "frontend_architecture", CategoryPath: types.StringArray{"架构总览"}, Scope: "复用已完成主题的代码结论，汇总阅读入口与生成缺口", SortOrder: -100})
 		}
 		pagesToGenerate = pages
@@ -956,12 +999,18 @@ func (s *codeWikiService) executeRun(ctx context.Context, run *types.CodeWikiRun
 				page := &pages[i]
 				guard.AllowedPages = append(guard.AllowedPages, page.Slug)
 				if live := bySlug[page.Slug]; live != nil {
+					page.Title = live.Title
 					page.BaselineVersion, page.BaselineSource = live.Version, live.LastEditSource
 					page.CategoryPath, page.PageType = live.CategoryPath, live.PageType
 					page.SortOrder = live.SortOrder
 					if !state.cfg.FullSourceReanalysis {
 						page.Summary = live.Summary
 					}
+				}
+			}
+			if guard.TopicUpdates {
+				if err := s.prepareCodeWikiTopicImpact(ctx, state, pages, raw); err != nil {
+					return err
 				}
 			}
 			blob, err := json.Marshal(state.cfg)
@@ -1259,10 +1308,11 @@ func (s *codeWikiService) planOutline(ctx context.Context, state *codeWikiRunSta
 			liveBySlug[live.Slug] = live
 		}
 		var pages []codeWikiPlannedPage
+		moves := codeWikiSourceMoves(state.cfg.SourceChanges)
 		for _, page := range prior {
 			// A kept human page is not silently made machine-authored later.
 			live := liveBySlug[page.PageKey]
-			if live == nil || live.LastEditSource == types.WikiEditSourceUser || live.LastEditSource == types.WikiEditSourceRevert {
+			if live == nil || live.Status == types.WikiPageStatusArchived || live.LastEditSource == types.WikiEditSourceUser || live.LastEditSource == types.WikiEditSourceRevert {
 				continue
 			}
 			if page.Status != types.CodeWikiRunPageStatusPublished && page.Status != types.CodeWikiRunPageStatusSkipped && page.Status != types.CodeWikiRunPageStatusPreserved {
@@ -1277,6 +1327,10 @@ func (s *codeWikiService) planOutline(ctx context.Context, state *codeWikiRunSta
 				}
 				frozen.Title, frozen.Slug = live.Title, live.Slug
 			}
+			if len(moves) > 0 {
+				relocateCodeWikiSources(&pages[len(pages)-1], moves)
+			}
+			removeDeletedCodeWikiRoots(&pages[len(pages)-1], state.cfg.SourceChanges)
 		}
 		if len(pages) == 0 {
 			return nil, fmt.Errorf("published directory baseline has no reusable pages")

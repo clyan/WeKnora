@@ -605,6 +605,8 @@ func IsTerminalCodeWikiRunStatus(status string) bool {
 // publish) or failed/canceled. Exactly one run per KB may be
 // status=published (partial unique index).
 type CodeWikiRun struct {
+	// WriteLeaseOwner is set only on a claimed worker's in-memory copy.
+	WriteLeaseOwner   string     `json:"-" gorm:"-"`
 	ExecutionEpoch    int        `json:"execution_epoch" gorm:"default:0"`
 	ModelCallLimit    int        `json:"-" gorm:"default:0"`
 	ExecutionDeadline *time.Time `json:"execution_deadline,omitempty"`
@@ -925,6 +927,8 @@ var (
 	ErrCodeWikiArtifactNotFound    = errors.New("code wiki analysis artifact not found")
 	ErrCodeWikiProfileNotFound     = errors.New("code wiki analysis profile not found")
 	ErrCodeWikiRunNotFound         = errors.New("code wiki run not found")
+	ErrCodeWikiRunNotCanceled      = errors.New("只能删除已取消的生成任务")
+	ErrCodeWikiRunLeaseLost        = errors.New("执行已失效，进度已保存，请刷新任务状态")
 	ErrCodeWikiTopicNotFound       = errors.New("未找到该主题，请刷新任务目录")
 	ErrCodeWikiTopicChanged        = errors.New("主题分析版本已变化，请刷新后再操作")
 	ErrCodeWikiProgressChanged     = errors.New("任务进度已更新，请刷新主题列表后重新翻页")
@@ -959,11 +963,18 @@ type CodeWikiCodeSnippet struct {
 // CodeWikiMaxSnippetLines bounds evidence excerpt reads.
 const CodeWikiMaxSnippetLines = 60
 
-// CodeWikiRunLeaseTTLSeconds bounds a worker's exclusive claim on a run;
-// must exceed the longest allowed run timeout (MaxCodeWikiRunTimeoutMinutesCap)
-// so a live worker's lease is never stolen, while a crashed worker's run
-// becomes re-claimable (via user retry) afterwards.
-const CodeWikiRunLeaseTTLSeconds = int(MaxCodeWikiRunTimeoutMinutesCap)*60 + 600
+// The lease is renewed every 15 seconds, independently of model latency.
+const CodeWikiRunLeaseTTLSeconds = 90
+
+// CodeWikiRunHeartbeatAt also understands leases written before short leases
+// were introduced. Historical progress must not appear hours in the future.
+func CodeWikiRunHeartbeatAt(expires, now time.Time) time.Time {
+	ttl := time.Duration(CodeWikiRunLeaseTTLSeconds) * time.Second
+	if expires.After(now.Add(5 * time.Minute)) {
+		ttl = time.Duration(int(MaxCodeWikiRunTimeoutMinutesCap)*60+600) * time.Second
+	}
+	return expires.Add(-ttl)
+}
 
 // FormatCodeWikiError keeps error text bounded for storage/display.
 func FormatCodeWikiError(err error) string {

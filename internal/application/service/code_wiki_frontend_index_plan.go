@@ -245,8 +245,22 @@ func (s *codeWikiService) planIndexedFrontendCatalog(ctx context.Context, state 
 		}
 		state.cfg.FrontendPlannerVersion = frontendIndexPlannerVersion
 		byID := map[string]frontendIndexCandidate{}
+		byPath := map[string]frontendIndexCandidate{}
 		for _, candidate := range candidates {
 			byID[candidate.ID] = candidate
+			byPath[candidate.Path] = candidate
+		}
+		// Published topic scopes are stable. Existing files do not need another
+		// naming pass merely because a worker/batch boundary changed. New files
+		// remain candidates and can extend the same category+domain identity.
+		if guard := state.cfg.PublicationGuard; guard != nil && guard.TopicUpdates && progress.StructureCursor == 0 {
+			for _, page := range progress.Pages {
+				for _, source := range page.SourcePaths {
+					if _, exists := byPath[source]; exists {
+						progress.Decisions[source] = "candidate: 复用已发布主题身份；按影响范围决定是否重查"
+					}
+				}
+			}
 		}
 		modules, err := frontendIndexModules(candidates, progress)
 		if err != nil {
@@ -317,6 +331,16 @@ func (s *codeWikiService) planIndexedFrontendCatalog(ctx context.Context, state 
 				}
 			}
 			offset = end
+		}
+		for i := range progress.Pages {
+			page := &progress.Pages[i]
+			page.DependencyPaths = frontendDependencyPaths(page.SourcePaths, byPath)
+			page.DependencyVersion = 1
+			for _, dependency := range page.DependencyPaths {
+				if candidate, ok := byPath[dependency]; !ok || candidate.Boundary != "" {
+					page.DependencyVersion = 0 // Unknown/deleted locations require conservative review.
+				}
+			}
 		}
 		all = append(all, progress.Pages...)
 	}

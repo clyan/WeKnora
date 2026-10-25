@@ -375,6 +375,11 @@ func TestCodeWikiTopicOverviewUsesAcceptedRevisionsAndReportsGaps(t *testing.T) 
 	require.Contains(t, content, "待澄清")
 	require.Contains(t, content, "Failed：分析未完成")
 	require.NotContains(t, content, "[[failed|")
+	state.cfg.PublicationGuard = &types.CodeWikiPublicationGuard{ArchivePages: map[string]string{"api": "fingerprint"}}
+	require.NoError(t, s.buildTopicOverview(context.Background(), state, &cp, topics))
+	require.Len(t, cp.Items, 1, "archived conclusions must not be quoted in the new guide")
+	require.Equal(t, "page", cp.Items[0].SourceTopicKey)
+	require.NotContains(t, cp.Sections[0].Content, "[[api|")
 	topics[1].Status = "paused"
 	require.False(t, codeWikiOverviewReady(topics))
 	topics[0].Status, topics[1].Status = "failed", "failed"

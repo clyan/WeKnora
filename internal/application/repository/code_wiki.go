@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -421,7 +422,7 @@ func (r *codeWikiRepository) GetRun(ctx context.Context, kbID, id string) (*type
 func (r *codeWikiRepository) GetRunControl(ctx context.Context, kbID, id string) (*types.CodeWikiRun, error) {
 	var run types.CodeWikiRun
 	err := r.db.WithContext(ctx).
-		Select("id", "tenant_id", "knowledge_base_id", "status", "pause_requested", "cancel_requested", "execution_epoch", "execution_deadline").
+		Select("id", "tenant_id", "knowledge_base_id", "status", "pause_requested", "cancel_requested", "execution_epoch", "execution_deadline", "lease_owner", "lease_expires_at").
 		Where("id = ? AND knowledge_base_id = ?", id, kbID).First(&run).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, types.ErrCodeWikiRunNotFound
@@ -488,7 +489,28 @@ func (r *codeWikiRepository) PublishedRun(ctx context.Context, kbID string) (*ty
 func (r *codeWikiRepository) UpdateRun(ctx context.Context, run *types.CodeWikiRun) error {
 	// Worker snapshots must never clear a pause/cancel request made while a
 	// model or evidence call was in flight. Control flags have their own write.
-	return r.db.WithContext(ctx).Omit("PauseRequested", "CancelRequested", "LeaseOwner", "LeaseExpiresAt").Save(run).Error
+	omit := []string{"PauseRequested", "CancelRequested", "LeaseOwner", "LeaseExpiresAt"}
+	if run.WriteLeaseOwner != "" && run.Status == types.CodeWikiRunStatusPaused {
+		// A stopped execution must wait for an explicit resume, including
+		// shutdown and budget pauses where no API set the control flag.
+		run.PauseRequested = true
+		omit = []string{"CancelRequested", "LeaseOwner", "LeaseExpiresAt"}
+	}
+	query := r.db.WithContext(ctx).Omit(omit...)
+	if run.WriteLeaseOwner != "" {
+		result := query.Model(&types.CodeWikiRun{}).
+			Where("id = ? AND knowledge_base_id = ? AND tenant_id = ? AND lease_owner = ? AND lease_expires_at > ? AND status IN ?",
+				run.ID, run.KnowledgeBaseID, run.TenantID, run.WriteLeaseOwner, time.Now().UTC(), codeWikiDiscoveryStatuses()).
+			Select("*").Updates(run)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return types.ErrCodeWikiRunLeaseLost
+		}
+		return nil
+	}
+	return query.Save(run).Error
 }
 
 func (r *codeWikiRepository) RequestRunControl(ctx context.Context, kbID, runID, control string) error {
@@ -548,11 +570,19 @@ func (r *codeWikiRepository) ListRunEvents(ctx context.Context, kbID, runID stri
 // A heartbeat extends the lease without changing UpdatedAt or emitting a
 // business event. An obsolete worker cannot renew another owner's lease.
 func (r *codeWikiRepository) HeartbeatRun(ctx context.Context, runID, owner string) error {
-	return r.db.WithContext(ctx).Model(&types.CodeWikiRun{}).
-		Where("id = ? AND lease_owner = ? AND status IN ?", runID, owner, []string{
+	now := time.Now().UTC()
+	result := r.db.WithContext(ctx).Model(&types.CodeWikiRun{}).
+		Where("id = ? AND lease_owner = ? AND lease_expires_at > ? AND status IN ?", runID, owner, now, []string{
 			types.CodeWikiRunStatusPreparing, types.CodeWikiRunStatusAnalyzing, types.CodeWikiRunStatusPlanning,
 			types.CodeWikiRunStatusGenerating, types.CodeWikiRunStatusValidating}).
-		UpdateColumn("lease_expires_at", time.Now().UTC().Add(time.Duration(types.CodeWikiRunLeaseTTLSeconds)*time.Second)).Error
+		UpdateColumn("lease_expires_at", now.Add(time.Duration(types.CodeWikiRunLeaseTTLSeconds)*time.Second))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return types.ErrCodeWikiRunLeaseLost
+	}
+	return nil
 }
 
 func (r *codeWikiRepository) ApproveRunImpact(ctx context.Context, kbID, runID, planToken string, config types.JSON) error {
@@ -595,6 +625,37 @@ func (r *codeWikiRepository) TryAcquireRunLease(ctx context.Context, runID, owne
 		return false, res.Error
 	}
 	return res.RowsAffected > 0, nil
+}
+
+// DeleteCanceledRun atomically guards the status and removes run-owned data.
+// Shared snapshots, analysis artifacts and published pages remain intact.
+func (r *codeWikiRepository) DeleteCanceledRun(ctx context.Context, kbID, runID string) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Where("knowledge_base_id = ? AND id = ? AND status = ?", kbID, runID, types.CodeWikiRunStatusCanceled).
+			Delete(&types.CodeWikiRun{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			if _, err := (&codeWikiRepository{db: tx}).GetRun(ctx, kbID, runID); err != nil {
+				return err
+			}
+			return types.ErrCodeWikiRunNotCanceled
+		}
+		for _, model := range []any{
+			&types.CodeWikiRunPage{}, &types.CodeWikiRunRepository{},
+			&types.CodeWikiTopic{}, &types.CodeWikiRunEvent{},
+			&types.CodeWikiFactRecord{}, &types.CodeWikiModelSlot{},
+		} {
+			if err := tx.Where("run_id = ?", runID).Delete(model).Error; err != nil {
+				return err
+			}
+		}
+		// Published evidence is retained defensively even for an inconsistent
+		// canceled status, so deleting history cannot break page citations.
+		return tx.Where("run_id = ? AND (page_id = '' OR page_id IS NULL)", runID).
+			Delete(&types.CodeWikiPageEvidence{}).Error
+	})
 }
 
 // DeleteRunsByKB soft-deletes a KB's runs. Non-terminal rows are first
@@ -913,13 +974,35 @@ func (r *codeWikiRepository) PublishRun(
 			if err != nil {
 				return err
 			}
+			archive := frozen.Guard != nil && frozen.Guard.ArchivePages[candidate.PageKey] != ""
+			if archive && (live == nil || !frozen.Guard.TopicUpdates || !frozen.Guard.ReviewApproved ||
+				frozen.Guard.ArchivePages[candidate.PageKey] != types.CodeWikiPageFingerprint(live) ||
+				candidate.Content != live.Content || candidate.Summary != live.Summary) {
+				return fmt.Errorf("invalid reviewed archive candidate: %s", candidate.PageKey)
+			}
+			if live != nil && live.Status == types.WikiPageStatusArchived {
+				return fmt.Errorf("archived topic requires an explicit restoration plan: %s", candidate.PageKey)
+			}
 			if frozen.Guard != nil && live != nil && (candidate.Title != live.Title || candidate.PageType != live.PageType ||
 				strings.Join(candidate.CategoryPath, "\x00") != strings.Join(live.CategoryPath, "\x00")) {
 				return fmt.Errorf("page %s identity or directory changes require an explicit migration", candidate.PageKey)
 			}
 			if frozen.Guard != nil && frozen.Guard.ReviewApproved && live != nil {
-				if err := types.ValidateCodeWikiSectionChanges(live.Content, candidate.Content, frozen.Guard.AllowedSections[candidate.PageKey]); err != nil {
-					return err
+				if frozen.Guard.TopicUpdates {
+					if live.LastEditSource == types.WikiEditSourceUser || live.LastEditSource == types.WikiEditSourceRevert {
+						return fmt.Errorf("human-maintained topic cannot be replaced by incremental generation: %s", candidate.PageKey)
+					}
+					operation := "replace"
+					if archive {
+						operation = "archive"
+					}
+					if frozen.Guard.AllowedSections[candidate.PageKey][operation] != types.CodeWikiPageFingerprint(live) {
+						return fmt.Errorf("topic replacement is outside the reviewed impact scope: %s", candidate.PageKey)
+					}
+				} else {
+					if err := types.ValidateCodeWikiSectionChanges(live.Content, candidate.Content, frozen.Guard.AllowedSections[candidate.PageKey]); err != nil {
+						return err
+					}
 				}
 			}
 			if frozen.Guard != nil && frozen.Guard.ReviewApproved && live == nil {
@@ -930,7 +1013,7 @@ func (r *codeWikiRepository) PublishRun(
 			}
 			// Identical candidates do not create revisions, evidence or writes to
 			// the live row. Preserve its timestamps and original evidence version.
-			if live != nil && live.Title == candidate.Title && live.PageType == candidate.PageType &&
+			if !archive && live != nil && live.Title == candidate.Title && live.PageType == candidate.PageType &&
 				live.Content == candidate.Content && live.Summary == candidate.Summary && live.Status == types.WikiPageStatusPublished {
 				if err := tx.Model(&types.CodeWikiRunPage{}).Where("id = ?", candidate.ID).
 					Update("status", types.CodeWikiRunPageStatusPreserved).Error; err != nil {
@@ -946,8 +1029,14 @@ func (r *codeWikiRepository) PublishRun(
 			if err != nil {
 				return fmt.Errorf("apply page %s: %w", candidate.PageKey, err)
 			}
+			if (nextPage.Status == types.WikiPageStatusArchived) != archive {
+				return fmt.Errorf("page lifecycle differs from reviewed plan: %s", candidate.PageKey)
+			}
 			if frozen.Guard != nil {
 				for _, target := range nextPage.OutLinks {
+					if frozen.Guard.ArchivePages[target] != "" {
+						return fmt.Errorf("wiki link targets archived topic: %s -> %s", candidate.PageKey, target)
+					}
 					known := false
 					for _, prior := range oldLinks {
 						if prior == target {
@@ -966,7 +1055,7 @@ func (r *codeWikiRepository) PublishRun(
 						if err != nil {
 							return err
 						}
-						if linked == nil {
+						if linked == nil || linked.Status == types.WikiPageStatusArchived {
 							return fmt.Errorf("new dangling wiki link: %s -> %s", candidate.PageKey, target)
 						}
 					}
@@ -996,6 +1085,9 @@ func (r *codeWikiRepository) PublishRun(
 		// Phase 3: evidence rows bound to the published versions.
 		var evidenceRows []*types.CodeWikiPageEvidence
 		for _, pub := range publishedPages {
+			if pub.page.Status == types.WikiPageStatusArchived {
+				continue // Historical evidence stays bound to its original version.
+			}
 			for _, spec := range evidenceByPage[pub.candidate.PageKey] {
 				evidenceRows = append(evidenceRows, &types.CodeWikiPageEvidence{
 					ID:              uuid.NewString(),
@@ -1033,6 +1125,18 @@ func (r *codeWikiRepository) PublishRun(
 			seen := make(map[string]bool, len(after))
 			for _, page := range after {
 				seen[page.Slug] = true
+				if page.Status != types.WikiPageStatusArchived && len(frozen.Guard.ArchivePages) > 0 {
+					links := append(types.StringArray(nil), page.OutLinks...)
+					for _, match := range codeWikiPublishLinkPattern.FindAllStringSubmatch(page.Content, -1) {
+						target := strings.SplitN(match[1], "|", 2)[0]
+						links = append(links, strings.ReplaceAll(strings.ToLower(strings.TrimSpace(target)), " ", "-"))
+					}
+					for _, target := range links {
+						if frozen.Guard.ArchivePages[target] != "" {
+							return fmt.Errorf("archive leaves an unresolved incoming link: %s -> %s; review the referring page first", page.Slug, target)
+						}
+					}
+				}
 				if !writtenSlugs[page.Slug] && untouchedFingerprints[page.Slug] != types.CodeWikiPageFingerprint(page) {
 					return fmt.Errorf("actual write audit detected a change outside the publication write set: %s", page.Slug)
 				}
@@ -1109,3 +1213,5 @@ func (r *codeWikiRepository) PublishRun(
 	}
 	return nil, nil
 }
+
+var codeWikiPublishLinkPattern = regexp.MustCompile(`\[\[([^\]]+)\]\]`)

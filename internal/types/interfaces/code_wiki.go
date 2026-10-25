@@ -2,6 +2,7 @@ package interfaces
 
 import (
 	"context"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/hibiken/asynq"
@@ -119,6 +120,9 @@ type CodeWikiRepository interface {
 	RecordRunEvent(ctx context.Context, event *types.CodeWikiRunEvent) error
 	ListRunEvents(ctx context.Context, kbID, runID string, beforeID int64) ([]*types.CodeWikiRunEvent, error)
 	HeartbeatRun(ctx context.Context, runID, owner string) error
+	// RecoverInterruptedRuns pauses stale discovery workers, or workers owned
+	// by ownerPrefix during graceful shutdown. It never starts model work.
+	RecoverInterruptedRuns(ctx context.Context, now time.Time, ownerPrefix string) error
 	ApproveRunImpact(ctx context.Context, kbID, runID, planToken string, config types.JSON) error
 	// TryAcquireRunLease atomically claims a pending run for a worker:
 	// succeeds only when status is still pending (or the previous lease
@@ -126,6 +130,8 @@ type CodeWikiRepository interface {
 	TryAcquireRunLease(ctx context.Context, runID, owner string, ttlSeconds int) (bool, error)
 	// DeleteRunsByKB soft-deletes every run of a KB (KB deletion).
 	DeleteRunsByKB(ctx context.Context, kbID string) error
+	// DeleteCanceledRun removes only a canceled run from generation history.
+	DeleteCanceledRun(ctx context.Context, kbID, runID string) error
 
 	// --- Run manifest ---
 
@@ -247,6 +253,7 @@ type CodeWikiService interface {
 	ListRuns(ctx context.Context, kbID string) ([]*types.CodeWikiRun, error)
 	ListFactRecords(ctx context.Context, kbID, runID, recordType, after string, limit int) ([]*types.CodeWikiFactRecord, error)
 	CancelRun(ctx context.Context, kbID, runID string) error
+	DeleteRun(ctx context.Context, kbID, runID string) error
 	// PauseRun parks an in-flight run in paused; ResumeRun continues it from
 	// the persisted plan (staged pages kept, pending pages regenerate).
 	PauseRun(ctx context.Context, kbID, runID string) error

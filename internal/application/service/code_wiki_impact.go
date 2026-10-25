@@ -57,6 +57,17 @@ func (s *codeWikiService) ApproveRunImpact(ctx context.Context, kbID, runID stri
 		}
 		guard.AllowedSections[slug] = approved
 	}
+	if guard.TopicUpdates {
+		// Advancing the joint source baseline with an intentionally stale
+		// affected topic would hide that change on the following increment.
+		for slug, sections := range guard.Sections {
+			for _, section := range sections {
+				if guard.AllowedSections[slug][section.ID] != section.Hash {
+					return fmt.Errorf("请确认全部受影响主题后继续；未受影响主题会原样保留")
+				}
+			}
+		}
+	}
 	guard.ReviewRequired, guard.ReviewApproved = false, true
 	blob, err := json.Marshal(cfg)
 	if err != nil {

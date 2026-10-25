@@ -33,6 +33,16 @@ func (s *codeWikiService) discoverCodeWikiAdditions(ctx context.Context, state *
 		for _, page := range catalog {
 			if !known[page.Slug] {
 				proposed = append(proposed, page)
+			} else {
+				for i := range pages {
+					if pages[i].Slug == page.Slug {
+						// Preserve directory/title/order while carrying updated source
+						// ownership and complete dependency navigation.
+						pages[i].SourcePaths = page.SourcePaths
+						pages[i].DependencyPaths = page.DependencyPaths
+						pages[i].DependencyVersion = page.DependencyVersion
+					}
+				}
 			}
 		}
 		return normalizeCodeWikiAdditions(state, pages, proposed, summaries, guard)
@@ -100,6 +110,9 @@ func normalizeCodeWikiAdditions(state *codeWikiRunState, pages, proposed []codeW
 		}
 		if known[page.Slug] {
 			continue
+		}
+		if guard.Pages[page.Slug] != "" {
+			return nil, fmt.Errorf("主题身份 %s 已被历史归档或人工文档保留，需要明确的恢复或迁移计划", page.Slug)
 		}
 		known[page.Slug] = true
 		if state.cfg.DirectoryVersion != types.CodeWikiDirectoryVersionFrontend && len(pages)+len(additions) >= state.cfg.MaxPages {

@@ -380,6 +380,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 		}
 	}))
 	logger.Debugf(ctx, "[Container] Data source sync framework registered")
+	must(container.Invoke(startCodeWikiRecovery))
 	must(container.Invoke(startAuditLogRetention))
 	logger.Debugf(ctx, "[Container] Audit log retention runner registered")
 	must(container.Provide(service.NewHousekeepingService))
@@ -1728,6 +1729,27 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
 		return nil, errs
 	}
 	return registry, nil
+}
+
+// Recovery runs in both standard and Lite mode, without occupying a worker slot.
+func startCodeWikiRecovery(svc interfaces.CodeWikiService, cleaner interfaces.ResourceCleaner) {
+	recovery, ok := svc.(interface {
+		RunRecovery(context.Context)
+		PauseOwnedRuns(context.Context) error
+	})
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); recovery.RunRecovery(ctx) }()
+	cleaner.RegisterWithName("CodeWikiRecovery", func() error {
+		cancel()
+		<-done
+		pauseCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		return recovery.PauseOwnedRuns(pauseCtx)
+	})
 }
 
 // startDataSourceScheduler starts the data source cron scheduler and registers cleanup.

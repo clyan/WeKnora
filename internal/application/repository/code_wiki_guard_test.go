@@ -148,7 +148,7 @@ func TestCodeWikiHeartbeatAndEventPaginationAreIndependent(t *testing.T) {
 	fresh, err := repo.GetRunByID(ctx, run.ID)
 	require.NoError(t, err)
 	require.Equal(t, worker.UpdatedAt, fresh.UpdatedAt)
-	require.NoError(t, repo.HeartbeatRun(ctx, run.ID, "other-worker"))
+	require.ErrorIs(t, repo.HeartbeatRun(ctx, run.ID, "other-worker"), types.ErrCodeWikiRunLeaseLost)
 	worker.Phase = "still working"
 	require.NoError(t, repo.UpdateRun(ctx, worker))
 	stored, err := repo.GetRunByID(ctx, run.ID)

@@ -54,8 +54,12 @@ func topicRun(tx *gorm.DB, tenant uint64, kb, run string) (*types.CodeWikiRun, e
 
 func (r *codeWikiRepository) EnsureTopics(ctx context.Context, run *types.CodeWikiRun, rows []*types.CodeWikiTopic) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if _, err := topicRun(tx, run.TenantID, run.KnowledgeBaseID, run.ID); err != nil {
+		fresh, err := topicRun(tx, run.TenantID, run.KnowledgeBaseID, run.ID)
+		if err != nil {
 			return err
+		}
+		if !discoveryLeaseValid(run, fresh) {
+			return types.ErrCodeWikiRunLeaseLost
 		}
 		for _, row := range rows {
 			if row.TenantID != run.TenantID || row.KnowledgeBaseID != run.KnowledgeBaseID || row.RunID != run.ID {
@@ -98,6 +102,9 @@ func (r *codeWikiRepository) BeginTopicPass(ctx context.Context, run *types.Code
 		fresh, err := topicRun(tx, run.TenantID, run.KnowledgeBaseID, run.ID)
 		if err != nil {
 			return err
+		}
+		if !discoveryLeaseValid(run, fresh) {
+			return types.ErrCodeWikiRunLeaseLost
 		}
 		if fresh.CancelRequested || types.IsTerminalCodeWikiRunStatus(fresh.Status) {
 			return errTopicLeaseLost
